@@ -13,12 +13,12 @@ commons-compress = "1.28.0"
 # MinIO 9.x is a major API rewrite (io.minio.http.Method -> io.minio.Http.Method);
 # S3UploadProvider was migrated for it. The runtime S3 upload path is not CI-verified.
 minio = "9.0.3"
-gson = "2.14.0"
-junit = "6.1.0"
+gson = "2.15.0"
+junit = "6.1.3"
 bstats = "3.2.1"
 velocity = "3.4.0"
 bungeecord = "1.21-R0.4"
-shadow = "9.4.2"
+shadow = "9.6.1"
 # pcxgg fork of plugwright (bots on Minecraft 26.2/26.3); resolved from mavenLocal,
 # see settings.gradle.
 plugwright = "3.1.0-pcx.1"
