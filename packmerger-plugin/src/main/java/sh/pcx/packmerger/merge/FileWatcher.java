@@ -8,7 +8,10 @@ import java.nio.file.*;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.IntSupplier;
+import java.util.function.Predicate;
 import sh.pcx.packmerger.PluginLogger;
 
 /**
@@ -45,14 +48,58 @@ public class FileWatcher {
     /** The NIO watch service handle, used for cleanup on stop. */
     private WatchService watchService;
 
+    /** The folder watched; {@code null} = the packs folder (resolved on start). */
+    private final Path root;
+
+    /** Thread-name suffix and log label; {@code null} for the packs folder watcher. */
+    private final String name;
+
+    /** Which changes (relative to the watched folder) count. */
+    private final Predicate<Path> relevant;
+
+    /** Seconds without a relevant change before the settled action runs. */
+    private final IntSupplier debounceSeconds;
+
+    /** What to do once changes have settled; {@code null} = merge. */
+    private final Runnable onSettled;
+
+    /** Folders that could not be registered (inotify limit, network file system). */
+    private final AtomicInteger unwatchable = new AtomicInteger();
+
     /**
-     * Creates a new file watcher bound to the given plugin.
+     * Creates the packs-folder watcher bound to the given plugin: relevant changes
+     * trigger {@link PackMergerBootstrap#mergeAndUpload}.
      *
      * @param plugin the owning PackMergerBootstrap plugin
      */
     public FileWatcher(PackMergerBootstrap plugin) {
+        this(plugin, null, null, FileWatcher::isRelevant,
+                () -> plugin.getConfigManager().getHotReloadDebounceSeconds(), null);
+    }
+
+    /**
+     * Creates a watcher for any folder (used for the datapack folders).
+     *
+     * @param root            the folder to watch (and every non-dot folder below it)
+     * @param name            thread-name suffix and log label
+     * @param relevant        which changes, relative to {@code root}, count
+     * @param debounceSeconds quiet period before {@code onSettled} runs
+     * @param onSettled       called once changes have settled ({@code null}: merge)
+     */
+    public FileWatcher(PackMergerBootstrap plugin, Path root, String name, Predicate<Path> relevant,
+                       IntSupplier debounceSeconds, Runnable onSettled) {
         this.plugin = plugin;
         this.logger = plugin.getPluginLogger();
+        this.root = root;
+        this.name = name;
+        this.relevant = relevant;
+        this.debounceSeconds = debounceSeconds;
+        this.onSettled = onSettled;
+    }
+
+    /** @return {@code true} if some folder could not be watched (callers may poll instead) */
+    public boolean isDegraded() {
+        return unwatchable.get() > 0 || (running.get() && (watchThread == null || !watchThread.isAlive()));
     }
 
     /**
@@ -71,10 +118,11 @@ public class FileWatcher {
     public void start() {
         if (running.get()) return;
 
-        Path packsPath = plugin.getPacksFolder().toPath().toAbsolutePath().normalize();
-        if (!packsPath.toFile().exists()) {
+        Path packsPath = (root != null ? root : plugin.getPacksFolder().toPath()).toAbsolutePath().normalize();
+        if (root == null && !packsPath.toFile().exists()) {
             packsPath.toFile().mkdirs();
         }
+        String label = name == null ? "Pack file" : "[" + name + "]";
 
         running.set(true);
         watchThread = new Thread(() -> {
@@ -83,12 +131,13 @@ public class FileWatcher {
                 Map<WatchKey, Path> watchedDirs = new HashMap<>();
                 registerTree(packsPath, packsPath, watchedDirs);
 
-                logger.info("File watcher started for: " + packsPath + " (" + watchedDirs.size() + " folder(s))");
+                String startedMsg = "File watcher started for: " + packsPath + " (" + watchedDirs.size() + " folder(s))";
+                if (name == null) logger.info(startedMsg); else logger.debug(startedMsg);
 
                 // Debounce state: tracks the timestamp of the last relevant file event.
                 // When this is non-zero and the debounce period elapses, a merge is triggered.
                 AtomicLong lastEventTime = new AtomicLong(0);
-                int debounceMs = plugin.getConfigManager().getHotReloadDebounceSeconds() * 1000;
+                int debounceMs = debounceSeconds.getAsInt() * 1000;
 
                 while (running.get()) {
                     WatchKey key;
@@ -124,7 +173,7 @@ public class FileWatcher {
 
                         Path changed = dir.resolve((Path) event.context());
                         Path relative = packsPath.relativize(changed);
-                        if (isRelevant(relative)) {
+                        if (relevant.test(relative)) {
                             hasRelevantEvent = true;
                             logger.debug("File change detected: " + kind.name() + " " + relative);
                         }
@@ -140,8 +189,8 @@ public class FileWatcher {
                         // Reset the debounce timer — we'll wait for the full debounce period
                         // from this point before triggering
                         lastEventTime.set(System.currentTimeMillis());
-                        logger.info("Pack file change detected, waiting " +
-                                plugin.getConfigManager().getHotReloadDebounceSeconds() + "s before merging...");
+                        logger.info(label + " change detected, waiting " +
+                                debounceSeconds.getAsInt() + "s before " + (onSettled == null ? "merging..." : "re-scanning..."));
                     }
 
                     // Reset the watch key so we continue receiving events
@@ -161,7 +210,7 @@ public class FileWatcher {
             } catch (IOException e) {
                 logger.error("File watcher error", e);
             }
-        }, "PackMerger-FileWatcher");
+        }, name == null ? "PackMerger-FileWatcher" : "PackMerger-FileWatcher-" + name);
 
         // Daemon thread so it doesn't prevent server shutdown
         watchThread.setDaemon(true);
@@ -213,6 +262,7 @@ public class FileWatcher {
             logger.debug("File watcher could not scan " + start + ": " + e.getMessage());
         }
         if (failed[0] > 0) {
+            unwatchable.addAndGet(failed[0]);
             logger.warning("File watcher could not watch " + failed[0] + " folder(s) under " + start
                     + "; hot-reload will miss changes there. On Linux raise fs.inotify.max_user_watches"
                     + " (sysctl), or disable hot-reload and use /pm merge.");
@@ -239,7 +289,8 @@ public class FileWatcher {
             watchThread.interrupt();
             watchThread = null;
         }
-        logger.info("File watcher stopped");
+        if (name == null) logger.info("File watcher stopped");
+        else logger.debug("File watcher stopped: " + name);
     }
 
     /**
@@ -248,6 +299,10 @@ public class FileWatcher {
      * (automated merge, no in-game feedback).
      */
     private void triggerMerge() {
+        if (onSettled != null) {
+            onSettled.run();
+            return;
+        }
         logger.info("Debounce complete, triggering auto-merge...");
         // null sender = no in-game messages (this is an automated merge)
         plugin.mergeAndUpload(null);

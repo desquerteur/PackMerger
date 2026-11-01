@@ -1,6 +1,7 @@
 package sh.pcx.packmerger.merge;
 
 import org.junit.jupiter.api.Test;
+import sh.pcx.packmerger.datapack.DatapackLocator;
 
 import java.nio.file.Path;
 
@@ -33,5 +34,18 @@ class FileWatcherRelevanceTest {
         assertFalse(FileWatcher.isRelevant(Path.of("my-pack", ".git", "index")));
         assertFalse(FileWatcher.isRelevant(Path.of("my-pack", "assets", ".en_us.json.swp")));
         assertFalse(FileWatcher.isRelevant(Path.of("")));
+    }
+
+    @Test
+    void datapackPredicate_ignoresUploadsInProgressAndHiddenFiles() {
+        assertTrue(DatapackLocator.isRelevantChange(Path.of("terralith.zip")));
+        assertTrue(DatapackLocator.isRelevantChange(Path.of("folderpack", "data", "x", "a.json")));
+        assertFalse(DatapackLocator.isRelevantChange(Path.of("terralith.zip.part")));
+        assertFalse(DatapackLocator.isRelevantChange(Path.of("terralith.zip.crdownload")));
+        assertFalse(DatapackLocator.isRelevantChange(Path.of("terralith.zip.filepart")));
+        assertFalse(DatapackLocator.isRelevantChange(Path.of("upload.tmp")));
+        assertFalse(DatapackLocator.isRelevantChange(Path.of(".terralith.zip.swp")));
+        assertFalse(DatapackLocator.isRelevantChange(Path.of("folderpack", ".git", "index")));
+        assertFalse(DatapackLocator.isRelevantChange(Path.of("")));
     }
 }

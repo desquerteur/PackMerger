@@ -18,6 +18,7 @@ import sh.pcx.packmerger.api.events.PackUploadFailedEvent;
 import sh.pcx.packmerger.api.events.PackUploadedEvent;
 import sh.pcx.packmerger.api.events.PackValidationFailedEvent;
 import sh.pcx.packmerger.commands.PackMergerCommand;
+import sh.pcx.packmerger.commands.ConflictRenderer;
 import sh.pcx.packmerger.bedrock.BedrockConversionResult;
 import sh.pcx.packmerger.bedrock.BedrockConverter;
 import sh.pcx.packmerger.bedrock.BedrockConverterOptions;
@@ -28,6 +29,8 @@ import sh.pcx.packmerger.distribution.PackIdentity;
 import sh.pcx.packmerger.distribution.ProxyLink;
 import sh.pcx.packmerger.distribution.PublishedPack;
 import sh.pcx.packmerger.discovery.ApiPackManager;
+import sh.pcx.packmerger.datapack.DatapackPackManager;
+import sh.pcx.packmerger.listeners.WorldChangeListener;
 import sh.pcx.packmerger.integration.CompetingHostManager;
 import sh.pcx.packmerger.integration.GeyserFolder;
 import sh.pcx.packmerger.merge.OutputCopier;
@@ -35,6 +38,7 @@ import sh.pcx.packmerger.discovery.PluginPackManager;
 import sh.pcx.packmerger.listeners.PluginDisableListener;
 import sh.pcx.packmerger.listeners.PlayerJoinListener;
 import sh.pcx.packmerger.merge.FileWatcher;
+import sh.pcx.packmerger.merge.MergeInputs;
 import sh.pcx.packmerger.merge.MergeProvenance;
 import sh.pcx.packmerger.merge.PackMergeEngine;
 import sh.pcx.packmerger.merge.PackValidator;
@@ -143,6 +147,9 @@ public class PackMergerBootstrap implements PackMergerApi {
     /** Packs registered by other plugins through the API, staged into {@code packs/.api-packs/}. */
     private ApiPackManager apiPackManager;
 
+    /** Resource packs of the server's datapacks, staged into {@code packs/.datapack-packs/}. */
+    private DatapackPackManager datapackPackManager;
+
     /** Detects ItemsAdder/Oraxen/Nexo hosting their own pack; backs {@code /pm fixup}. */
     private CompetingHostManager competingHostManager;
 
@@ -241,10 +248,12 @@ public class PackMergerBootstrap implements PackMergerApi {
         pluginPackManager = new PluginPackManager(this);
         pluginPackManager.reconfigure();
         apiPackManager = new ApiPackManager(this);
+        datapackPackManager = new DatapackPackManager(this);
+        datapackPackManager.reconfigure();
         competingHostManager = new CompetingHostManager(this);
         updateChecker = new UpdateChecker(this);
 
-        // Poll versions.json off the main thread so a slow GitHub response
+        // Check for a newer release off the main thread so a slow GitHub response
         // doesn't delay enable. Failures are logged at DEBUG and silently
         // dropped — update-check is informational, never load-bearing.
         if (configManager.isUpdateCheckEnabled()) {
@@ -261,7 +270,22 @@ public class PackMergerBootstrap implements PackMergerApi {
             List<FetchResult> results = remotePackManager.fetchAll(
                     configManager.getRemotePacks(), RemotePackManager.Trigger.STARTUP);
             logRemoteFetchResults(results);
-        });
+        })
+                // Then scan the datapacks (waits for the first tick's world snapshot), so the
+                // startup merge sees their staged assets and approved downloads.
+                .<Void>handle((ignored, fetchError) -> {
+                    if (fetchError != null) {
+                        logger.warning("Remote pack fetch on startup failed: " + fetchError.getMessage());
+                    }
+                    return null;
+                })
+                .thenCompose(ignored -> datapackPackManager.scan(DatapackPackManager.ScanTrigger.STARTUP, false)
+                        .<Void>handle((report, scanError) -> {
+                            if (scanError != null) {
+                                logger.warning("[DATAPACK] startup scan failed: " + scanError.getMessage());
+                            }
+                            return null;
+                        }));
 
         // Restore last merge provenance from disk if present so /pm inspect and
         // the plugin API have data immediately on startup, before any merge runs
@@ -282,6 +306,8 @@ public class PackMergerBootstrap implements PackMergerApi {
         Bukkit.getPluginManager().registerEvents(new PlayerJoinListener(this), loader);
         // Drop API-registered packs of plugins that are disabled.
         Bukkit.getPluginManager().registerEvents(new PluginDisableListener(this), loader);
+        // Re-scan datapacks when worlds load/unload or the server reloads its data.
+        Bukkit.getPluginManager().registerEvents(new WorldChangeListener(this), loader);
 
         // Publish the API for other plugins (PackMergerApi.get()).
         Bukkit.getServicesManager().register(PackMergerApi.class, this, loader, ServicePriority.Normal);
@@ -314,11 +340,14 @@ public class PackMergerBootstrap implements PackMergerApi {
                 if (fetchError != null) {
                     logger.warning("Remote pack fetch on startup failed: " + fetchError.getMessage());
                 }
+                // The startup merge always runs (MergeOptions.STARTUP): a restart is when
+                // bedrock / output-copy-to changes take effect and API listeners expect
+                // PackMergeStartedEvent / PackMergedEvent, even if no pack changed.
                 if (delaySec <= 0) {
-                    mergeAndUpload(null);
+                    mergeAndUpload(null, MergeOptions.STARTUP);
                 } else {
                     Bukkit.getAsyncScheduler().runDelayed(loader,
-                            t -> mergeAndUpload(null), delaySec, TimeUnit.SECONDS);
+                            t -> mergeAndUpload(null, MergeOptions.STARTUP), delaySec, TimeUnit.SECONDS);
                 }
             });
         }
@@ -335,6 +364,9 @@ public class PackMergerBootstrap implements PackMergerApi {
         // (e.g. /oraxen reload) triggers a merge on its own. The watcher ignores
         // sources until the first staging pass has seen them.
         pluginPackManager.startWatcher();
+
+        // Watch the datapack folders (once the first snapshot names them).
+        datapackPackManager.restartWatchersLater();
     }
 
     public void onDisable(JavaPlugin loader) {
@@ -342,6 +374,10 @@ public class PackMergerBootstrap implements PackMergerApi {
         stopFileWatcher();
         if (pluginPackManager != null) {
             pluginPackManager.stopWatcher();
+        }
+        if (datapackPackManager != null) {
+            // Never waits for a running scan: the network part of a scan holds no lock.
+            datapackPackManager.shutdown();
         }
 
         // Shut down the built-in HTTP server if self-host is the active provider (or a fallback)
@@ -509,6 +545,49 @@ public class PackMergerBootstrap implements PackMergerApi {
      * @return a future that completes when the entire pipeline finishes (including upload)
      */
     public CompletableFuture<Void> mergeAndUpload(org.bukkit.command.CommandSender sender) {
+        return mergeAndUpload(sender, MergeOptions.AUTO);
+    }
+
+    /**
+     * How a merge was asked for.
+     *
+     * @param force           merge even when the inputs are unchanged ({@code /pm merge},
+     *                        {@code /pm reload}, {@code /pm rebuild}, the API)
+     * @param rescanDatapacks re-scan the datapacks (and wait for it) before staging
+     */
+    public record MergeOptions(boolean force, boolean rescanDatapacks) {
+        /** Watchers, rescans, API changes: skipped when the inputs are unchanged. */
+        public static final MergeOptions AUTO = new MergeOptions(false, false);
+        /** An operator or plugin explicitly asked for a merge. */
+        public static final MergeOptions FORCED = new MergeOptions(true, false);
+        /**
+         * The first merge after enable: always runs, as before input skipping existed, so
+         * Bedrock conversion, output copies and the merge events happen on every start.
+         */
+        public static final MergeOptions STARTUP = FORCED;
+        /** {@code /pm rebuild}: rescan datapacks, then force a merge. */
+        public static final MergeOptions REBUILD = new MergeOptions(true, true);
+    }
+
+    /**
+     * {@link #mergeAndUpload(org.bukkit.command.CommandSender)} with options: an
+     * automatic merge whose inputs ({@link MergeInputs}) equal those of the live pack is
+     * skipped, so an idle rescan neither rebuilds nor re-uploads.
+     */
+    public CompletableFuture<Void> mergeAndUpload(org.bukkit.command.CommandSender sender, MergeOptions options) {
+        // /pm rebuild: the datapack rescan (which may ask Modrinth) runs before the merge step,
+        // never inside it; then the merge is forced.
+        if (options.rescanDatapacks() && datapackPackManager != null) {
+            return datapackPackManager.scan(DatapackPackManager.ScanTrigger.REBUILD, false)
+                    .handle((report, error) -> {
+                        if (error != null) {
+                            logger.warning("[DATAPACK] rescan before the rebuild failed (" + error.getMessage()
+                                    + "); using the last scan");
+                        }
+                        return null;
+                    })
+                    .thenCompose(ignored -> mergeAndUpload(sender, new MergeOptions(options.force(), false)));
+        }
         // Atomically claim the merge lock — prevents concurrent merges from file watcher + commands
         if (!merging.compareAndSet(false, true)) {
             if (sender != null) {
@@ -549,6 +628,11 @@ public class PackMergerBootstrap implements PackMergerApi {
                     Bukkit.getPluginManager().callEvent(new PackMergerCollectPacksEvent(this));
                     apiPackManager.stageAll();
                 }
+                // Stage the resource-pack parts of the server's datapacks (local files only;
+                // scanning and downloads happen before, in DatapackPackManager.scan).
+                if (datapackPackManager != null) {
+                    datapackPackManager.stageAll();
+                }
                 // Re-check other item plugins' hosting settings (they may have changed them).
                 if (competingHostManager != null) {
                     competingHostManager.scan();
@@ -557,6 +641,18 @@ public class PackMergerBootstrap implements PackMergerApi {
                 // so removing a remote-packs entry actually removes the pack.
                 if (remotePackManager != null) {
                     remotePackManager.pruneUndeclared(configManager.getRemotePacks());
+                }
+
+                // Skip an automatic merge whose inputs are those of the live pack: same bytes.
+                String inputs = MergeInputs.fingerprint(mergeEngine.resolvedOrder(), mergeEngine::resolve,
+                        getPacksFolder(), configManager, loader.getPluginMeta().getVersion(),
+                        Bukkit.getMinecraftVersion());
+                if (!options.force() && inputsUnchanged(inputs, finalOutputFile)) {
+                    logger.merge("Inputs unchanged; keeping the live pack");
+                    if (sender != null) {
+                        sender.sendMessage(messageManager.getMessage("merge.unchanged"));
+                    }
+                    return;
                 }
 
                 File mergedTemp = mergeEngine.merge(tempOutputFile);
@@ -574,6 +670,12 @@ public class PackMergerBootstrap implements PackMergerApi {
                 MergeProvenance provenance = mergeEngine.getLastProvenance();
                 if (provenance != null) {
                     Bukkit.getPluginManager().callEvent(new PackMergeStartedEvent(provenance.packOrder()));
+                }
+                // One warning line when packs disagree and a datapack is involved.
+                String conflicts = ConflictRenderer.datapackSummary(provenance,
+                        PackMergeEngine.datapackAliases(getPacksFolder()));
+                if (conflicts != null) {
+                    logger.warning("[DATAPACK] [conflicts] " + conflicts);
                 }
 
                 // Step 2: Validate the merged pack for structural issues
@@ -612,6 +714,10 @@ public class PackMergerBootstrap implements PackMergerApi {
                 }
 
                 // Step 2c: Commit — promote the temp zip + its provenance sidecar to the final paths.
+                // The old inputs sidecar goes first: if the commit or the new sidecar's write
+                // fails (or the server dies in between), no stale fingerprint is left next to
+                // an output it does not describe, so the next automatic merge is not skipped.
+                safeDelete(MergeInputs.sidecar(finalOutputFile));
                 File outputFile;
                 try {
                     outputFile = commitMerge(tempOutputFile, finalOutputFile);
@@ -625,6 +731,7 @@ public class PackMergerBootstrap implements PackMergerApi {
                     }
                     return;
                 }
+                writeInputsSidecar(outputFile, inputs);
 
                 // Step 3: Compute SHA-1 hash (required by Minecraft's resource pack protocol)
                 byte[] hash = computeSha1(outputFile);
@@ -855,6 +962,11 @@ public class PackMergerBootstrap implements PackMergerApi {
             apiPackManager.reconfigure();
             apiPackManager.refreshDownloads();
         }
+        if (datapackPackManager != null) {
+            datapackPackManager.reconfigure();
+            datapackPackManager.scan(DatapackPackManager.ScanTrigger.RELOAD, false);
+            datapackPackManager.restartWatchersLater();
+        }
 
         if (competingHostManager != null) {
             Bukkit.getAsyncScheduler().runNow(loader, a -> competingHostManager.scan());
@@ -875,6 +987,9 @@ public class PackMergerBootstrap implements PackMergerApi {
 
     /** @return the API pack manager, or {@code null} before onEnable completes */
     public ApiPackManager getApiPackManager() { return apiPackManager; }
+
+    /** @return the datapack resource-pack manager, or {@code null} before onEnable completes */
+    public DatapackPackManager getDatapackPackManager() { return datapackPackManager; }
 
     /** @return the competing-host check, or {@code null} before onEnable completes */
     public CompetingHostManager getCompetingHostManager() { return competingHostManager; }
@@ -946,6 +1061,34 @@ public class PackMergerBootstrap implements PackMergerApi {
             moveWithAtomicFallback(tempProvenance, finalProvenance);
         }
         return finalOutput;
+    }
+
+    /**
+     * @return {@code true} when {@code inputs} equals the fingerprint stored for the
+     *         current output, the output exists and (with auto-upload) it is the pack
+     *         published through the current provider
+     */
+    private boolean inputsUnchanged(String inputs, File output) {
+        File sidecar = MergeInputs.sidecar(output);
+        if (!output.isFile() || !sidecar.isFile()) return false;
+        try {
+            if (!inputs.equals(Files.readString(sidecar.toPath(), StandardCharsets.UTF_8).trim())) return false;
+            if (!configManager.isAutoUpload()) return true;
+            PublishedPack live = publishedPack.get();
+            return live != null && live.providerGeneration() == providerGeneration
+                    && live.sha1Hex().equals(bytesToHex(computeSha1(output)));
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** Stores the inputs fingerprint next to the committed output (best effort). */
+    private void writeInputsSidecar(File output, String inputs) {
+        try {
+            Files.writeString(MergeInputs.sidecar(output).toPath(), inputs, StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            logger.debug("Could not write the merge inputs sidecar: " + e.getMessage());
+        }
     }
 
     private static void moveWithAtomicFallback(File source, File target) throws IOException {
@@ -1271,7 +1414,7 @@ public class PackMergerBootstrap implements PackMergerApi {
 
     @Override
     public CompletableFuture<Void> triggerMerge() {
-        return mergeAndUpload(null);
+        return mergeAndUpload(null, MergeOptions.FORCED);
     }
 
     @Override

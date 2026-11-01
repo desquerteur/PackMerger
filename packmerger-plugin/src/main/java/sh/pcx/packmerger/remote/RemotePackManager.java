@@ -59,6 +59,25 @@ public class RemotePackManager {
         this.cacheDir = new File(plugin.getPacksFolder(), ".remote-cache");
     }
 
+    /** Hash-verified downloads (external datapack resource packs); its own no-redirect client. */
+    private final VerifiedDownload verifiedDownload = new VerifiedDownload();
+
+    /**
+     * Downloads a file that must match a known SHA-512 ({@link VerifiedDownload}):
+     * HTTPS only, allowed hosts on every redirect, size cap, timeout, hash check before
+     * the file appears at {@code targetFile}. Synchronous; call it off the main thread.
+     * The existing {@link #fetchInto} is unchanged.
+     */
+    public FetchResult fetchVerified(VerifiedSpec spec, File targetFile) {
+        FetchResult r = verifiedDownload.fetch(spec, targetFile.toPath());
+        switch (r.status()) {
+            case FETCHED -> logger.remote(spec.alias() + ": downloaded from " + spec.url().getHost() + " (" + r.detail() + ")");
+            case NOT_MODIFIED -> logger.debug("[remote] " + spec.alias() + ": " + r.detail());
+            default -> logger.warning("[remote] " + spec.alias() + ": verified download failed (" + r.detail() + ")");
+        }
+        return r;
+    }
+
     /** @return {@code packs/.remote-cache/} — created on demand */
     public File cacheDir() {
         if (!cacheDir.exists()) cacheDir.mkdirs();

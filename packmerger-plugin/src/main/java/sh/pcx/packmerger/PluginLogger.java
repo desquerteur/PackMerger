@@ -127,6 +127,13 @@ public class PluginLogger {
         log("<blue>[REMOTE]</blue>", message);
     }
 
+    /** Datapack resource-pack discovery messages (scan results, staging, external packs). */
+    public void datapack(String message) {
+        if (!isEnabled(LogLevel.INFO))
+            return;
+        log("<dark_aqua>[DATAPACK]</dark_aqua>", message);
+    }
+
     /** Non-fatal issue warnings. */
     public void warning(String message) {
         if (!isEnabled(LogLevel.WARNING))

@@ -366,7 +366,7 @@ public class PackValidator {
      *         falling back to parsing {@code Bukkit.getBukkitVersion()} if
      *         the preferred method isn't available
      */
-    private static String getMinecraftVersion() {
+    static String getMinecraftVersion() {
         try {
             return Bukkit.getMinecraftVersion();
         } catch (NoSuchMethodError | NoClassDefFoundError e) {

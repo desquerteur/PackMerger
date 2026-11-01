@@ -1,5 +1,8 @@
 package sh.pcx.packmerger.merge;
 
+import com.google.gson.GsonBuilder;
+import com.google.gson.JsonObject;
+
 import java.util.Arrays;
 import java.util.List;
 
@@ -79,6 +82,35 @@ public final class PackFormatRegistry {
             }
         }
         return -1;
+    }
+
+    /** @return the newest pack format the registry knows (the first table entry) */
+    public static int newestKnown() {
+        return TABLE.get(0).packFormat();
+    }
+
+    /** The last format whose clients read only {@code pack_format} (as in PackMcmetaMergeStrategy). */
+    private static final int LAST_LEGACY_FORMAT = 64;
+
+    /**
+     * Builds a minimal resource-pack {@code pack.mcmeta} for one format: just
+     * {@code pack_format} for clients up to format 64 (1.21.8), plus
+     * {@code min_format}/{@code max_format}, which newer clients require.
+     *
+     * @param format      the resource-pack format (positive)
+     * @param description the pack description
+     */
+    public static String mcmetaFor(int format, String description) {
+        JsonObject pack = new JsonObject();
+        pack.addProperty("description", description);
+        if (format > LAST_LEGACY_FORMAT) {
+            pack.addProperty("min_format", format);
+            pack.addProperty("max_format", format);
+        }
+        pack.addProperty("pack_format", format);
+        JsonObject root = new JsonObject();
+        root.add("pack", pack);
+        return new GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create().toJson(root);
     }
 
     /**

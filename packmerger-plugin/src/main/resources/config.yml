@@ -11,7 +11,7 @@
 # startup if this is older than the plugin expects, so you know to review the
 # latest config.yml for newly added options. Missing keys always fall back to
 # safe defaults, so upgrades never break — this is purely informational.
-config-version: 6
+config-version: 8
 
 # =============================================================================
 # Server Identity
@@ -202,6 +202,94 @@ plugin-packs:
 #      plugin: "MyPlugin"
 #      path: "MyPlugin/generated/resource_pack"
 #      cluster: true
+
+# =============================================================================
+# Datapack Resource Packs (auto-discovery)
+# =============================================================================
+# PackMerger looks at the server's datapacks (world/datapacks/, plus the datapacks
+# folder of every loaded world) and merges the resource packs that belong to them:
+#   - assets/ next to data/ in the datapack ("hybrid" packs)
+#   - a resource pack inside the datapack: a folder (e.g. resourcepack/) or a zip
+#   - a resource pack the datapack declares on Modrinth (see external)
+# Only assets/, pack.png and a resource-pack pack.mcmeta (without its "filter"
+# section) are taken; a datapack's data/ never goes into the resource pack, and
+# players only ever download the merged resource pack (datapacks stay on the
+# server). Most datapacks have no resource pack; that is normal and only shows up
+# in /pm sources datapacks.
+# The server (Paper) only loads <level-name>/datapacks; datapacks in other worlds'
+# folders are listed by /pm sources but not merged (see only-enabled).
+# Staged copies live in packs/.datapack-packs/<alias>.zip; aliases look like
+# "dp-terralith" and can be placed in 'priority:' like any other pack.
+# Commands: /pm scan, /pm sources, /pm conflicts, /pm rebuild.
+# NEW in config-version 7.
+datapacks:
+  enabled: true
+  # Merge only datapacks the server has enabled (/datapack list). A datapacks folder
+  # the server does not load (e.g. inside a plugin-created world) is listed but not
+  # merged unless this is false.
+  # Default: true
+  only-enabled: true
+  # More folders to scan (relative to the server folder, or absolute).
+  # Default: []
+  extra-folders: []
+  # Where datapack packs not listed in 'priority:' go: "bottom" (lowest priority,
+  # below server-packs 'additional' too, so your own packs and plugin packs win) or "top".
+  # Default: bottom
+  position: bottom
+  # Re-scan when a datapack is added, changed or removed.
+  # Default: true
+  watch: true
+  # A changed datapack must keep its size and timestamp for 'polls' readings
+  # 'interval-millis' apart before it is read (so a half-uploaded zip is never used).
+  # Default: polls: 3, interval-millis: 1000
+  stability:
+    polls: 3
+    interval-millis: 1000
+  # Safety limits for reading datapacks and downloaded packs. A datapack over a
+  # limit is skipped and reported (/pm sources datapacks). max-uncompressed-mb also
+  # caps all staged datapack resource packs together, because the merge holds them
+  # in memory. Fixed limits on top: a .json/.mcmeta file over 4 MiB is skipped, and
+  # all of them together may hold 64 MiB of JSON.
+  limits:
+    max-file-mb: 200
+    max-uncompressed-mb: 512
+    max-entry-mb: 64
+    max-entries: 50000
+    max-compression-ratio: 100
+  external:
+    modrinth:
+      # Look up each datapack zip on Modrinth by its SHA-1 and download the resource
+      # pack its author declared (as a required dependency or a resource-pack file of
+      # the datapack's version). PRIVACY: sends the datapacks' SHA-1 hashes to
+      # api.modrinth.com. Every download is verified: HTTPS only, allowed-hosts on
+      # every redirect, size limit, and the SHA-512 Modrinth published.
+      # Default: true
+      enabled: true
+      api-url: "https://api.modrinth.com/v2"
+      # Downloads (and every redirect) must be HTTPS to one of these hosts.
+      allowed-hosts:
+        - "cdn.modrinth.com"
+      # Also take resource packs the author marked as optional.
+      # Default: false
+      include-optional: false
+      # true  = download (and merge) every resource pack found for a datapack without
+      #         asking; the verification above still applies to every file.
+      # false = each found file waits for an admin: /pm sources pending lists them,
+      #         /pm sources approve <id> downloads one, /pm sources reject <id> refuses it.
+      # Default: true (CHANGED in config-version 8: zero configuration; older configs
+      #          keep the value they have)
+      auto-approve: true
+      # With auto-approve: false, Modrinth project IDs whose new versions are approved
+      # automatically. IDs only (8 letters/digits, e.g. "AANobbMI", shown on the project
+      # page): slugs can be renamed and taken over by someone else, so they are ignored.
+      # Default: []
+      trusted-projects: []
+      timeout-seconds: 20
+      max-download-mb: 100
+      # How long a lookup result (also "not on Modrinth") is reused before asking
+      # again. /pm scan refresh asks again right away.
+      # Default: 24
+      lookup-cache-hours: 24
 
 # =============================================================================
 # Profiles (optional)
@@ -592,19 +680,22 @@ distribution:
   # Marks the pack as required in the request the client receives. The client then
   # shows a "required" prompt with no "proceed without" button. On its own this flag
   # does NOT kick anyone: PackMerger only kicks when enforce-required (below) is on.
+  # Together with enforce-required this FORCES every player to download the pack.
   #
   # Valid values: true, false
-  # Default: false
-  required: false
+  # Default: true (CHANGED in config-version 8; older configs keep the value they have,
+  #          and PackMerger logs a hint on startup when the pack is not forced)
+  required: true
 
   # Server-side enforcement for a required pack (only used when required: true).
   # When enabled, PackMerger kicks a player who declines the pack, or whose download
   # still fails after the retries below are used up. INVALID_URL and FAILED_RELOAD
   # never kick: those point at a hosting or pack problem that would lock everyone out.
+  # Set enabled: false to send the required flag without kicking anyone.
   enforce-required:
     # Valid values: true, false
-    # Default: false (the required flag is sent, nobody is kicked)
-    enabled: false
+    # Default: true (CHANGED in config-version 8)
+    enabled: true
     # Kick message (MiniMessage).
     kick-message: "<red>This server requires its resource pack.</red> <gray>Rejoin and accept it to play.</gray>"
 
@@ -833,14 +924,16 @@ log-level: "info"
 # Update Check
 # =============================================================================
 
-# PackMerger polls a small versions.json file in the GitHub repo on enable to
-# see if a newer release is available. Results are logged to the console and
+# On enable, PackMerger asks GitHub for the latest release of this fork
+# (github.com/desquerteur/PackMerger; pre-releases and dev-* builds are ignored)
+# to see if a newer version is available. Results are logged to the console and
 # admins see a one-line chat notice on join. No auto-download; everything is
 # advisory.
 #
-# This is an outbound request to raw.githubusercontent.com (GitHub), which sees
-# your server's IP address; nothing else is sent. Disable this if your server
-# doesn't have outbound internet or you don't want the startup HTTP call.
+# This is an outbound request to api.github.com (GitHub), which sees your
+# server's IP address; nothing else is sent. Disable this if your server doesn't
+# have outbound internet or you don't want the startup HTTP call.
+# (The old upstream default, pcxgg's versions.json, is replaced automatically.)
 update-check:
   enabled: true
-  url: "https://raw.githubusercontent.com/pcxgg/PackMerger/master/versions.json"
+  url: "https://api.github.com/repos/desquerteur/PackMerger/releases/latest"

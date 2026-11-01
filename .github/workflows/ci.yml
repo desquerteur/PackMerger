@@ -1,15 +1,26 @@
 name: CI
 
+# Every push and pull request builds and runs the JUnit suite. A push to the default branch
+# (master or main) also publishes the jars as a new GitHub pre-release ("dev build").
 on:
   push:
-    branches: [master]
+    branches: ['**']
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+# A newer push to a feature branch or pull request cancels the older run. Default-branch
+# pushes each get their own group so every one of them is built; the dev-release job below
+# serializes the publishing itself.
+concurrency:
+  group: ci-${{ github.ref }}-${{ (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main') && github.run_id || 'latest' }}
+  cancel-in-progress: true
+
 jobs:
   build:
+    name: Build and test
     runs-on: ubuntu-latest
 
     steps:
@@ -30,8 +41,103 @@ jobs:
         with:
           mockbukkit-ref: ''
 
-      # `build` runs the full JUnit suite (via check) and produces the shaded
-      # jar — the same artifact the release workflow ships. Until now nothing
-      # ran the tests in CI; this is the gate.
+      # `build` runs the full JUnit suite (via check) and produces the shaded jars. The
+      # version gets a dev suffix (e.g. 1.3.0-dev.42.abc1234) so jar names and plugin.yml
+      # tell builds apart. The plugwright e2e suite (plugwrightTest) is not part of `build`:
+      # it boots a Paper server with mineflayer bots and is run locally.
       - name: Build and test
-        run: ./gradlew build
+        run: >-
+          ./gradlew build
+          --init-script .github/gradle/ci-version.init.gradle
+          -PpmVersionSuffix="dev.${GITHUB_RUN_NUMBER}.${GITHUB_SHA::7}"
+
+      - name: Upload test reports
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-reports
+          path: '*/build/reports/tests/'
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Upload jars
+        uses: actions/upload-artifact@v7
+        with:
+          name: packmerger-jars
+          path: |
+            packmerger-plugin/build/libs/packmerger-plugin-*.jar
+            packmerger-velocity/build/libs/packmerger-velocity-*.jar
+            packmerger-bungee/build/libs/packmerger-bungee-*.jar
+          if-no-files-found: error
+          retention-days: 14
+
+  dev-release:
+    name: Publish dev pre-release
+    needs: build
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    # One publisher at a time, so the pruning below never races a release being created.
+    concurrency:
+      group: dev-release
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+
+    steps:
+      - name: Download jars
+        uses: actions/download-artifact@v8
+        with:
+          name: packmerger-jars
+          path: dist
+
+      - name: Create the pre-release
+        run: |
+          set -euo pipefail
+          short_sha="${GITHUB_SHA::7}"
+          tag="dev-${GITHUB_RUN_NUMBER}-${short_sha}"
+          mapfile -t jars < <(find dist -name '*.jar' | sort)
+          plugin_jar="$(find dist -name 'packmerger-plugin-*.jar' | head -n 1)"
+          version="$(basename "$plugin_jar" .jar)"
+          version="${version#packmerger-plugin-}"
+
+          {
+            echo "Automatic development build of \`${GITHUB_REF_NAME}\` at ${GITHUB_SHA}."
+            echo
+            echo "Plugin version: \`${version}\`. This is not a stable release."
+            echo
+            echo "### Commits"
+            jq -r '.commits[]? | "- \(.message | split("\n")[0]) (\(.id[0:7]))"' "$GITHUB_EVENT_PATH"
+            compare="$(jq -r '.compare // empty' "$GITHUB_EVENT_PATH")"
+            if [ -n "$compare" ]; then
+              echo
+              echo "**Diff**: ${compare}"
+            fi
+          } > notes.md
+
+          # A re-run of the same workflow run keeps its run number: replace the assets then.
+          if gh release view "$tag" > /dev/null 2>&1; then
+            gh release upload "$tag" "${jars[@]}" --clobber
+          else
+            gh release create "$tag" "${jars[@]}" \
+              --prerelease \
+              --target "$GITHUB_SHA" \
+              --title "Dev build #${GITHUB_RUN_NUMBER} (${short_sha})" \
+              --notes-file notes.md
+          fi
+
+      # Keep the 10 newest dev builds. Only pre-releases whose tag starts with "dev-" are
+      # touched; real releases (v*) are never deleted.
+      - name: Prune old dev pre-releases
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          gh release list --exclude-drafts --limit 200 --json tagName,isPrerelease,createdAt \
+            --jq '[.[] | select(.isPrerelease and (.tagName | startswith("dev-")))]
+                  | sort_by(.createdAt) | reverse | .[10:] | .[].tagName' |
+          while read -r old_tag; do
+            echo "Deleting $old_tag"
+            gh release delete "$old_tag" --cleanup-tag --yes
+          done

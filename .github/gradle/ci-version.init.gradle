@@ -1,0 +1,33 @@
+// Gradle init script used by the CI and release workflows to stamp the build version without
+// editing the build files. The root build.gradle sets one version for every module; this
+// script replaces it (-PpmVersion=1.4.0) or appends a suffix to it (-PpmVersionSuffix=dev.42.abc1234),
+// so the jar names, plugin.yml and the Velocity/Bungee version constants all carry it.
+//
+//   ./gradlew build --init-script .github/gradle/ci-version.init.gradle -PpmVersionSuffix=dev.1.abc1234
+def properties = gradle.startParameter.projectProperties
+def fullVersion = properties['pmVersion']
+def suffix = properties['pmVersionSuffix']
+
+def stamp = { project ->
+    if (fullVersion) {
+        project.version = fullVersion
+    } else if (suffix && !project.version.toString().endsWith("-${suffix}")) {
+        project.version = "${project.version}-${suffix}"
+    }
+}
+
+if (fullVersion || suffix) {
+    // The root build.gradle assigns the version to all modules while the root project is
+    // evaluated, so the root is stamped right after its evaluation and every subproject right
+    // before its own build script runs (plugin.yml expansion reads the version there).
+    gradle.afterProject { project ->
+        if (project == project.rootProject) {
+            stamp(project)
+        }
+    }
+    gradle.beforeProject { project ->
+        if (project != project.rootProject) {
+            stamp(project)
+        }
+    }
+}

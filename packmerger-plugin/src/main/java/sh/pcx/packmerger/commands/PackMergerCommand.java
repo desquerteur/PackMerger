@@ -14,6 +14,8 @@ import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 import sh.pcx.packmerger.PackMergerBootstrap;
 import sh.pcx.packmerger.config.MessageManager;
+import sh.pcx.packmerger.datapack.DatapackPackManager;
+import sh.pcx.packmerger.datapack.ExternalPackStore;
 import sh.pcx.packmerger.merge.MergeProvenance;
 import sh.pcx.packmerger.merge.PackValidator;
 import sh.pcx.packmerger.remote.FetchResult;
@@ -125,6 +127,31 @@ public class PackMergerCommand {
                                             .executes(this::handleInspectExport))
                                     .then(Commands.argument("pack", StringArgumentType.string())
                                             .executes(this::handleInspectPack)))
+                            .then(Commands.literal("conflicts")
+                                    .executes(ctx -> handleConflicts(ctx, null))
+                                    .then(Commands.argument("pack", StringArgumentType.string())
+                                            .executes(ctx -> handleConflicts(ctx, StringArgumentType.getString(ctx, "pack")))))
+                            .then(Commands.literal("rebuild")
+                                    .executes(this::handleRebuild))
+                            .then(Commands.literal("scan")
+                                    .executes(ctx -> handleScan(ctx, false))
+                                    .then(Commands.literal("refresh")
+                                            .executes(ctx -> handleScan(ctx, true))))
+                            .then(Commands.literal("sources")
+                                    .executes(ctx -> handleSources(ctx, null))
+                                    .then(Commands.literal("datapacks")
+                                            .executes(ctx -> handleSources(ctx, "datapacks")))
+                                    .then(Commands.literal("pending")
+                                            .executes(this::handleSourcesPending))
+                                    .then(Commands.literal("info")
+                                            .then(Commands.argument("id", StringArgumentType.word())
+                                                    .executes(this::handleSourcesInfo)))
+                                    .then(Commands.literal("approve")
+                                            .then(Commands.argument("id", StringArgumentType.word())
+                                                    .executes(this::handleSourcesApprove)))
+                                    .then(Commands.literal("reject")
+                                            .then(Commands.argument("id", StringArgumentType.word())
+                                                    .executes(this::handleSourcesReject))))
                             .then(Commands.literal("fetch")
                                     .executes(this::handleFetchAll)
                                     .then(Commands.argument("alias", StringArgumentType.string())
@@ -175,7 +202,7 @@ public class PackMergerCommand {
         sender.sendMessage(msg.getMessage("reload.starting"));
 
         plugin.reload();
-        plugin.mergeAndUpload(sender);
+        plugin.mergeAndUpload(sender, PackMergerBootstrap.MergeOptions.FORCED);
 
         return 1;
     }
@@ -189,7 +216,7 @@ public class PackMergerCommand {
      * @return 1 (success)
      */
     private int handleMerge(CommandContext<CommandSourceStack> ctx) {
-        plugin.mergeAndUpload(ctx.getSource().getSender());
+        plugin.mergeAndUpload(ctx.getSource().getSender(), PackMergerBootstrap.MergeOptions.FORCED);
         return 1;
     }
 
@@ -312,6 +339,7 @@ public class PackMergerCommand {
             sender.sendMessage(msg.getMessage("status.plugin-packs-off"));
         }
         sendApiPackStatus(sender, msg);
+        sendDatapackStatus(sender, msg);
         sendCompetingHostStatus(sender, msg);
         sendBedrockStatus(sender, msg);
         if (plugin.getProxyLink() != null) {
@@ -328,6 +356,310 @@ public class PackMergerCommand {
         // LocalTime.toString() drops the seconds when they are 00; always print HH:mm:ss.
         return java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss")
                 .format(java.time.LocalTime.ofInstant(at, java.time.ZoneId.systemDefault()));
+    }
+
+    /** {@code /pm status}: the datapack line (and pending approvals). */
+    private void sendDatapackStatus(CommandSender sender, MessageManager msg) {
+        DatapackPackManager dp = plugin.getDatapackPackManager();
+        if (dp == null || !plugin.getConfigManager().isDatapacksEnabled()) {
+            sender.sendMessage(msg.getMessage("status.datapacks-off"));
+            return;
+        }
+        sender.sendMessage(msg.getMessage("status.datapacks", "state", dp.statusLine() + " (/pm sources datapacks)"));
+        int pending = dp.pendingEntries().size();
+        if (pending > 0) {
+            sender.sendMessage(msg.getMessage("status.pending-approval", "count", String.valueOf(pending)));
+        }
+    }
+
+    // ---- /pm scan, /pm sources -------------------------------------------
+
+    /** Most conflicts listed in chat; the rest are counted. */
+    private static final int MAX_CONFLICT_LINES = 20;
+
+    /** {@code /pm conflicts [pack]} — files where packs really disagree (not identical, not cleanly merged). */
+    private int handleConflicts(CommandContext<CommandSourceStack> ctx, String pack) {
+        CommandSender sender = ctx.getSource().getSender();
+        MessageManager msg = plugin.getMessageManager();
+        MergeProvenance prov = plugin.getLastMergeProvenance();
+        if (prov == null) {
+            sender.sendMessage(msg.getMessage("conflicts.no-merge"));
+            return 0;
+        }
+        List<ConflictRenderer.Conflict> conflicts = ConflictRenderer.conflicts(prov,
+                sh.pcx.packmerger.merge.PackMergeEngine.datapackAliases(plugin.getPacksFolder()), pack);
+        if (conflicts.isEmpty()) {
+            sender.sendMessage(msg.getMessage("conflicts.none"));
+            return 1;
+        }
+        sender.sendMessage(msg.getMessage("conflicts.header", "count", String.valueOf(conflicts.size())));
+        for (int i = 0; i < conflicts.size() && i < MAX_CONFLICT_LINES; i++) {
+            ConflictRenderer.Conflict c = conflicts.get(i);
+            sender.sendMessage(msg.getMessage("conflicts.line", "path", c.path(), "winner", c.winner(),
+                    "losers", String.join(", ", c.losers()) + (c.note() == null ? "" : " (" + c.note() + ")")));
+        }
+        if (conflicts.size() > MAX_CONFLICT_LINES) {
+            sender.sendMessage(msg.getMessage("conflicts.more", "count", String.valueOf(conflicts.size() - MAX_CONFLICT_LINES)));
+        }
+        sender.sendMessage(msg.getMessage("conflicts.hint"));
+        return 1;
+    }
+
+    /** {@code /pm rebuild} — re-scan the datapacks, then merge even if nothing changed. */
+    private int handleRebuild(CommandContext<CommandSourceStack> ctx) {
+        CommandSender sender = ctx.getSource().getSender();
+        sender.sendMessage(plugin.getMessageManager().getMessage("rebuild.starting"));
+        plugin.mergeAndUpload(sender, PackMergerBootstrap.MergeOptions.REBUILD);
+        return 1;
+    }
+
+    /** {@code /pm scan [refresh]} — re-scan the datapacks and report what was found. */
+    private int handleScan(CommandContext<CommandSourceStack> ctx, boolean refresh) {
+        CommandSender sender = ctx.getSource().getSender();
+        MessageManager msg = plugin.getMessageManager();
+        DatapackPackManager dp = plugin.getDatapackPackManager();
+        if (dp == null || !plugin.getConfigManager().isDatapacksEnabled()) {
+            sender.sendMessage(msg.getMessage("scan.disabled"));
+            return 1;
+        }
+        sender.sendMessage(msg.getMessage("scan.starting"));
+        dp.scan(DatapackPackManager.ScanTrigger.MANUAL, refresh).whenComplete((report, error) -> {
+            if (error != null) {
+                sender.sendMessage(msg.getMessage("merge.failed", "error", String.valueOf(error.getMessage())));
+                return;
+            }
+            sendScanReport(sender, msg, report);
+        });
+        return 1;
+    }
+
+    private static void sendScanReport(CommandSender sender, MessageManager msg, DatapackPackManager.ScanReport report) {
+        sender.sendMessage(msg.getMessage("scan.summary",
+                "count", String.valueOf(report.datapacks()),
+                "folders", String.valueOf(report.folders().size()),
+                "paths", report.folders().isEmpty() ? "none" : String.join(", ", report.folders())));
+        for (String line : report.lines()) {
+            String[] p = line.split("\\|", 3);
+            String key = switch (p[0]) {
+                case "merged" -> "scan.line-merged";
+                case "pending" -> "scan.line-pending";
+                case "problem" -> "scan.line-problem";
+                default -> "scan.line-error";
+            };
+            sender.sendMessage(msg.getMessage(key, "alias", p[1], "id", p[1], "detail", p.length > 2 ? p[2] : ""));
+        }
+        if (report.dataOnly() > 0) {
+            sender.sendMessage(msg.getMessage("scan.line-data-only", "count", String.valueOf(report.dataOnly())));
+        }
+        sender.sendMessage(msg.getMessage(report.changed() ? "scan.merge-requested" : "scan.unchanged"));
+    }
+
+    /**
+     * {@code /pm sources [datapacks]} — every pack source and its state: packs/ folder,
+     * remote packs, plugin packs, API packs, datapacks (and external packs).
+     */
+    private int handleSources(CommandContext<CommandSourceStack> ctx, String filter) {
+        CommandSender sender = ctx.getSource().getSender();
+        MessageManager msg = plugin.getMessageManager();
+        DatapackPackManager dp = plugin.getDatapackPackManager();
+        List<String[]> rows = new java.util.ArrayList<>();
+        if (filter == null) {
+            File[] local = plugin.getPacksFolder().listFiles();
+            if (local != null) {
+                java.util.Arrays.sort(local);
+                for (File f : local) {
+                    String n = f.getName();
+                    if (n.startsWith(".") || n.equals("pack.mcmeta") || n.equals("pack.png")) continue;
+                    if (!f.isDirectory() && !n.endsWith(".zip")) continue;
+                    rows.add(new String[]{n, "packs", "present", "packs/" + n});
+                }
+            }
+            for (RemoteSpec r : plugin.getConfigManager().getRemotePacks()) {
+                boolean cached = new File(new File(plugin.getPacksFolder(), ".remote-cache"), r.alias() + ".zip").isFile();
+                rows.add(new String[]{r.alias(), "remote", cached ? "cached" : "not downloaded", r.url()});
+            }
+            if (plugin.getPluginPackManager() != null && plugin.getConfigManager().isPluginPacksEnabled()) {
+                for (String state : plugin.getPluginPackManager().getIntegrationStates()) {
+                    int colon = state.lastIndexOf(": ");
+                    rows.add(new String[]{colon > 0 ? state.substring(0, colon) : state, "plugin",
+                            colon > 0 ? state.substring(colon + 2) : "", "packs/.plugin-packs"});
+                }
+            }
+            if (plugin.getApiPackManager() != null) {
+                List<String> merged = plugin.getApiPackManager().getMergedAliases();
+                for (var r : plugin.getRegisteredPacks()) {
+                    rows.add(new String[]{r.alias(), "api", merged.contains(r.alias()) ? "merged" : "not merged yet",
+                            "registered by " + r.owner()});
+                }
+            }
+        }
+        if (dp != null && plugin.getConfigManager().isDatapacksEnabled()) {
+            for (DatapackPackManager.SourceView v : dp.sources()) {
+                rows.add(new String[]{v.id(), v.kind(), v.state(), v.origin() + (v.detail() == null ? "" : " — " + v.detail())});
+            }
+        } else if ("datapacks".equals(filter)) {
+            sender.sendMessage(msg.getMessage("scan.disabled"));
+            return 1;
+        }
+        sender.sendMessage(msg.getMessage(filter == null ? "sources.header" : "sources.datapacks-header"));
+        if (rows.isEmpty()) {
+            sender.sendMessage(msg.getMessage("sources.none"));
+            return 1;
+        }
+        for (String[] r : rows) {
+            sender.sendMessage(msg.getMessage("sources.line", "id", r[0], "kind", r[1], "state", r[2], "detail", r[3]));
+        }
+        return 1;
+    }
+
+    /** @return the datapack manager when external packs are usable, else tells the sender why not */
+    private DatapackPackManager externalPacks(CommandSender sender, MessageManager msg) {
+        DatapackPackManager dp = plugin.getDatapackPackManager();
+        if (dp == null || !plugin.getConfigManager().isDatapacksEnabled()) {
+            sender.sendMessage(msg.getMessage("scan.disabled"));
+            return null;
+        }
+        if (!plugin.getConfigManager().isModrinthEnabled()) {
+            sender.sendMessage(msg.getMessage("sources.modrinth-off"));
+        }
+        return dp;
+    }
+
+    /** {@code /pm sources pending} — external packs waiting for approval. */
+    private int handleSourcesPending(CommandContext<CommandSourceStack> ctx) {
+        CommandSender sender = ctx.getSource().getSender();
+        MessageManager msg = plugin.getMessageManager();
+        DatapackPackManager dp = externalPacks(sender, msg);
+        if (dp == null) return 1;
+        List<ExternalPackStore.Entry> pending = dp.pendingEntries();
+        if (pending.isEmpty()) {
+            sender.sendMessage(msg.getMessage("sources.none-pending"));
+            return 1;
+        }
+        sender.sendMessage(msg.getMessage("sources.pending-header"));
+        for (ExternalPackStore.Entry e : pending) {
+            sender.sendMessage(msg.getMessage("sources.pending-line", "id", e.id(), "provider", "Modrinth",
+                    "project", e.projectName(), "version", String.valueOf(e.versionNumber()),
+                    "size", e.size() < 0 ? "size unknown" : sh.pcx.packmerger.datapack.ZipLimits.describe(e.size()),
+                    "datapack", String.valueOf(e.datapack()), "reason", String.valueOf(e.reason())));
+            sender.sendMessage(msg.getMessage("sources.pending-hint", "id", e.id()));
+        }
+        return 1;
+    }
+
+    /** {@code /pm sources info <id>} — everything known about one external pack. */
+    private int handleSourcesInfo(CommandContext<CommandSourceStack> ctx) {
+        CommandSender sender = ctx.getSource().getSender();
+        MessageManager msg = plugin.getMessageManager();
+        DatapackPackManager dp = externalPacks(sender, msg);
+        if (dp == null) return 1;
+        String id = StringArgumentType.getString(ctx, "id");
+        ExternalPackStore.Entry e = dp.externalStore().get(id).orElse(null);
+        if (e == null) {
+            sender.sendMessage(msg.getMessage("sources.unknown-id", "id", id));
+            return 0;
+        }
+        String[][] rows = {
+                {"id", e.id()}, {"state", e.state() + (e.decidedBy() == null ? "" : " by " + e.decidedBy())},
+                {"datapack", e.datapack()}, {"reason", e.reason()},
+                {"project", e.projectName() + " (" + e.projectId() + ")"},
+                {"version", e.versionNumber() + " (" + e.versionId() + ")"},
+                {"file", e.fileName()}, {"url", e.url()},
+                {"size", e.size() < 0 ? "unknown" : sh.pcx.packmerger.datapack.ZipLimits.describe(e.size())},
+                {"sha1", e.sha1()}, {"sha512", e.sha512()},
+                {"first seen", String.valueOf(e.firstSeen())}, {"last seen", String.valueOf(e.lastSeen())}};
+        for (String[] r : rows) {
+            sender.sendMessage(msg.getMessage("sources.info-line", "key", r[0], "value", String.valueOf(r[1])));
+        }
+        return 1;
+    }
+
+    /** {@code /pm sources approve <id|all>} — approve, download (verified), re-scan and merge. */
+    private int handleSourcesApprove(CommandContext<CommandSourceStack> ctx) {
+        CommandSender sender = ctx.getSource().getSender();
+        MessageManager msg = plugin.getMessageManager();
+        if (!mayDecideSources(ctx.getSource(), msg)) return 0;
+        DatapackPackManager dp = externalPacks(sender, msg);
+        if (dp == null) return 1;
+        String id = StringArgumentType.getString(ctx, "id");
+        List<String> ids = "all".equalsIgnoreCase(id)
+                ? dp.pendingEntries().stream().map(ExternalPackStore.Entry::id).toList() : List.of(id);
+        if (ids.isEmpty()) {
+            sender.sendMessage(msg.getMessage("sources.approved-none"));
+            return 1;
+        }
+        for (String one : ids) {
+            ExternalPackStore.Entry e = dp.externalStore().get(one).orElse(null);
+            if (e == null) {
+                sender.sendMessage(msg.getMessage("sources.unknown-id", "id", one));
+                continue;
+            }
+            String host;
+            try {
+                host = java.net.URI.create(e.url()).getHost();
+            } catch (IllegalArgumentException ex) {
+                host = "?";
+            }
+            sender.sendMessage(msg.getMessage("sources.approved", "id", e.id(), "host", String.valueOf(host)));
+            dp.approve(e.id(), sender.getName()).whenComplete((r, t) -> {
+                if (t != null || r == null || r.isFailure()) {
+                    sender.sendMessage(msg.getMessage("sources.download-failed", "id", e.id(),
+                            "error", t != null ? String.valueOf(t.getMessage()) : r == null ? "unknown id" : r.detail()));
+                } else {
+                    sender.sendMessage(msg.getMessage("sources.download-ok", "algorithm", "sha512",
+                            "size", e.size() < 0 ? "?" : sh.pcx.packmerger.datapack.ZipLimits.describe(e.size())));
+                }
+            });
+        }
+        return 1;
+    }
+
+    /**
+     * Checks permission and who is asking: approving a download is a human decision, so
+     * it is refused for command blocks, non-player entities and anything run "as" or
+     * "at" another entity (a datapack function using {@code /execute as}).
+     */
+    private boolean mayDecideSources(CommandSourceStack source, MessageManager msg) {
+        CommandSender sender = source.getSender();
+        if (!sender.hasPermission("packmerger.sources.approve")) {
+            sender.sendMessage(msg.getMessage("sources.no-permission"));
+            return false;
+        }
+        if (!isHumanSource(sender, source.getExecutor())) {
+            sender.sendMessage(msg.getMessage("sources.not-allowed"));
+            plugin.getPluginLogger().warning("[DATAPACK] refused /pm sources approve|reject from " + sender.getName()
+                    + " (" + sender.getClass().getSimpleName() + "): only a player or the console may decide");
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * @param executor the command's executing entity ({@code /execute as}), or {@code null}
+     * @return {@code true} for a player running the command themself, or the server
+     *         console / RCON without an {@code /execute as} entity
+     */
+    static boolean isHumanSource(CommandSender sender, Object executor) {
+        if (sender instanceof Player) return executor == null || executor == sender;
+        boolean console = sender instanceof org.bukkit.command.ConsoleCommandSender
+                || sender instanceof org.bukkit.command.RemoteConsoleCommandSender;
+        return console && executor == null;
+    }
+
+    /** {@code /pm sources reject <id>} — never ask for this exact file again. */
+    private int handleSourcesReject(CommandContext<CommandSourceStack> ctx) {
+        CommandSender sender = ctx.getSource().getSender();
+        MessageManager msg = plugin.getMessageManager();
+        if (!mayDecideSources(ctx.getSource(), msg)) return 0;
+        DatapackPackManager dp = externalPacks(sender, msg);
+        if (dp == null) return 1;
+        String id = StringArgumentType.getString(ctx, "id");
+        if (!dp.reject(id, sender.getName())) {
+            sender.sendMessage(msg.getMessage("sources.unknown-id", "id", id));
+            return 0;
+        }
+        sender.sendMessage(msg.getMessage("sources.rejected", "id", id));
+        return 1;
     }
 
     /** {@code /pm status}: packs registered by other plugins through the API. */
@@ -622,7 +954,7 @@ public class PackMergerCommand {
                 sender.sendMessage(MINI.deserialize(fetchLine(r)));
             }
             sender.sendMessage(MINI.deserialize("<gray>Triggering merge with refreshed packs…</gray>"));
-            plugin.mergeAndUpload(sender);
+            plugin.mergeAndUpload(sender, PackMergerBootstrap.MergeOptions.FORCED);
         });
         return 1;
     }
@@ -644,7 +976,7 @@ public class PackMergerCommand {
             FetchResult result = plugin.getRemotePackManager().fetch(spec);
             sender.sendMessage(MINI.deserialize(fetchLine(result)));
             sender.sendMessage(MINI.deserialize("<gray>Triggering merge with refreshed pack…</gray>"));
-            plugin.mergeAndUpload(sender);
+            plugin.mergeAndUpload(sender, PackMergerBootstrap.MergeOptions.FORCED);
         });
         return 1;
     }
@@ -699,7 +1031,7 @@ public class PackMergerCommand {
         plugin.getConfigManager().load();
         sender.sendMessage(MINI.deserialize("<green>Switched to profile <white>" + name + "</white></green>"));
         sender.sendMessage(MINI.deserialize("<gray>Triggering merge with new profile…</gray>"));
-        plugin.mergeAndUpload(sender);
+        plugin.mergeAndUpload(sender, PackMergerBootstrap.MergeOptions.FORCED);
         return 1;
     }
 
@@ -781,7 +1113,7 @@ public class PackMergerCommand {
         plugin.getConfigManager().load();
         sender.sendMessage(MINI.deserialize("<green>Priority updated:</green> <gray>" + what + "</gray>"));
         sender.sendMessage(MINI.deserialize("<gray>Triggering merge with new priority…</gray>"));
-        plugin.mergeAndUpload(sender);
+        plugin.mergeAndUpload(sender, PackMergerBootstrap.MergeOptions.FORCED);
     }
 
     /** {@code /pm inspect export} — write the full report to output/last-merge-report.txt. */

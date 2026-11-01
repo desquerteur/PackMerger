@@ -115,6 +115,17 @@ public class PlayerJoinListener implements Listener {
             }, null, 40L);
         }
 
+        // Tell admins about external resource packs (Modrinth) waiting for approval.
+        if (plugin.getDatapackPackManager() != null && player.hasPermission("packmerger.admin")
+                && plugin.getConfigManager().isDatapacksEnabled()) {
+            int pending = plugin.getDatapackPackManager().pendingEntries().size();
+            if (pending > 0) {
+                player.getScheduler().runDelayed(plugin.getLoader(), task -> player.sendMessage(
+                        plugin.getMessageManager().getMessage("join.pending-approval",
+                                "count", String.valueOf(pending))), null, 40L);
+            }
+        }
+
         if (!plugin.getConfigManager().isDistributionEnabled()) return;
 
         // A new client session starts without any server pack.

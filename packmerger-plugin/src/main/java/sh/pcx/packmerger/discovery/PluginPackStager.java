@@ -671,7 +671,7 @@ public final class PluginPackStager {
         return sb.toString();
     }
 
-    static String fingerprint(File f) {
+    public static String fingerprint(File f) {
         if (f.isFile()) return "f" + f.length() + "@" + f.lastModified();
         if (!f.isDirectory()) return ABSENT;
         long count = 0, total = 0, newest = 0, names = 17;

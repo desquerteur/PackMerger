@@ -3,8 +3,10 @@ version: '${version}'
 main: sh.pcx.packmerger.loader.PackMergerLoader
 api-version: '26.1'
 folia-supported: true
-author: PCX Network
-description: Merges multiple resource packs and hosts them externally
+# Original author first (MIT, pcxgg/PackMerger); this build is the desquerteur fork.
+authors: [PCX Network, desquerteur]
+website: https://github.com/desquerteur/PackMerger
+description: Merges resource packs (incl. those of datapacks) and makes every player download them. Fork of pcxgg/PackMerger.
 
 permissions:
   packmerger.admin:
@@ -13,3 +15,6 @@ permissions:
   packmerger.notify:
     description: Receive notifications when a new resource pack is available
     default: true
+  packmerger.sources.approve:
+    description: Approve or reject external resource-pack downloads (/pm sources approve|reject)
+    default: op

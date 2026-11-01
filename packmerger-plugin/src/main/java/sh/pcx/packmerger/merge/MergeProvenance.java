@@ -51,6 +51,11 @@ public final class MergeProvenance {
      *                     item-definition threshold claimed by two packs) and
      *                     automatic rewrites (e.g. a completed overlay format
      *                     range); empty when there was nothing to report
+     * @param identical    {@code true} if two or more packs contributed and every
+     *                     contribution was a plain overwrite with the same bytes
+     *                     (not a conflict)
+     * @param warned       {@code true} if a merge strategy reported a collision it
+     *                     had to resolve (a warning, as opposed to an informational note)
      */
     public record FileRecord(
             String path,
@@ -58,22 +63,41 @@ public final class MergeProvenance {
             List<String> contributors,
             String strategyName,
             boolean wasMerged,
-            List<String> notes) {
+            List<String> notes,
+            boolean identical,
+            boolean warned) {
 
         public FileRecord {
             contributors = List.copyOf(contributors);
             notes = notes == null ? List.of() : List.copyOf(notes);
         }
 
+        /** Record without the identical/warned flags (older callers and sidecars). */
+        public FileRecord(String path, String winner, List<String> contributors,
+                          String strategyName, boolean wasMerged, List<String> notes) {
+            this(path, winner, contributors, strategyName, wasMerged, notes, false, false);
+        }
+
         /** Record without notes (pre-notes callers and older sidecars). */
         public FileRecord(String path, String winner, List<String> contributors,
                           String strategyName, boolean wasMerged) {
-            this(path, winner, contributors, strategyName, wasMerged, List.of());
+            this(path, winner, contributors, strategyName, wasMerged, List.of(), false, false);
         }
 
         /** {@code true} if more than one pack contributed to this path. */
         public boolean isCollision() {
             return contributors.size() > 1;
+        }
+
+        /**
+         * {@code true} for a real conflict: several packs contributed, and either a plain
+         * overwrite replaced different bytes or a merge strategy had to resolve a
+         * collision. Identical copies and cleanly merged JSON (lang union, atlas
+         * concatenation, …) are not conflicts.
+         */
+        public boolean isConflict() {
+            if (contributors.stream().distinct().count() < 2) return false;
+            return (strategyName == null && !identical) || warned;
         }
     }
 
@@ -155,6 +179,8 @@ public final class MergeProvenance {
                 rec.notes().forEach(notes::add);
                 recJson.add("notes", notes);
             }
+            if (rec.identical()) recJson.addProperty("identical", true);
+            if (rec.warned()) recJson.addProperty("warned", true);
             filesJson.add(e.getKey(), recJson);
         }
         root.add("files", filesJson);
@@ -193,7 +219,10 @@ public final class MergeProvenance {
                 if (recJson.has("notes") && recJson.get("notes").isJsonArray()) {
                     for (JsonElement n : recJson.getAsJsonArray("notes")) notes.add(n.getAsString());
                 }
-                files.put(path, new FileRecord(path, winner, contributors, strategyName, wasMerged, notes));
+                boolean identical = recJson.has("identical") && recJson.get("identical").getAsBoolean();
+                boolean warned = recJson.has("warned") && recJson.get("warned").getAsBoolean();
+                files.put(path, new FileRecord(path, winner, contributors, strategyName, wasMerged, notes,
+                        identical, warned));
             }
 
             return new MergeProvenance(files, packOrder, mergedAt);
@@ -222,7 +251,17 @@ public final class MergeProvenance {
          *                     sources (i.e. not the first-contributor path)
          */
         public void record(String path, String pack, String strategyName, boolean wasMerged) {
+            record(path, pack, strategyName, wasMerged, false);
+        }
+
+        /**
+         * Like {@link #record(String, String, String, boolean)}; {@code sameBytesAsPrevious}
+         * says the contribution replaced the previous one with identical bytes.
+         */
+        public void record(String path, String pack, String strategyName, boolean wasMerged,
+                           boolean sameBytesAsPrevious) {
             MutableRecord rec = records.computeIfAbsent(path, p -> new MutableRecord());
+            if (!rec.contributors.isEmpty() && (strategyName != null || !sameBytesAsPrevious)) rec.allSame = false;
             rec.contributors.add(pack);
             rec.winner = pack;
             if (strategyName != null) {
@@ -243,6 +282,13 @@ public final class MergeProvenance {
         /** Attach a strategy note (resolved collision or automatic rewrite) to {@code path}. */
         public void note(String path, String message) {
             records.computeIfAbsent(path, p -> new MutableRecord()).notes.add(message);
+        }
+
+        /** Attach a strategy warning (a collision the strategy had to resolve) to {@code path}. */
+        public void warn(String path, String message) {
+            MutableRecord rec = records.computeIfAbsent(path, p -> new MutableRecord());
+            rec.notes.add(message);
+            rec.warned = true;
         }
 
         /** Remove a path — used by the engine when a file is overridden by a packs-folder custom file. */
@@ -269,7 +315,9 @@ public final class MergeProvenance {
                         Collections.unmodifiableList(new ArrayList<>(m.contributors)),
                         m.strategyName,
                         m.wasMerged,
-                        m.notes));
+                        m.notes,
+                        m.contributors.size() > 1 && m.allSame && m.strategyName == null,
+                        m.warned));
             }
             return new MergeProvenance(frozen, packOrder, mergedAt);
         }
@@ -280,6 +328,8 @@ public final class MergeProvenance {
             String strategyName;
             boolean wasMerged;
             final List<String> notes = new ArrayList<>();
+            boolean allSame = true;
+            boolean warned;
         }
     }
 }

@@ -38,7 +38,10 @@ public class ConfigManager {
      * so {@link #load()} can surface a one-line notice on older configs (we never
      * rewrite the file, since it carries operator comments).
      */
-    private static final int CURRENT_CONFIG_VERSION = 6;
+    private static final int CURRENT_CONFIG_VERSION = 8;
+
+    /** Whether missing keys take the zero-config defaults; see {@link #usesZeroConfigDefaults}. */
+    private boolean zeroConfigDefaults = true;
 
     /** Default kick message for {@code distribution.enforce-required}. */
     static final String DEFAULT_KICK_MESSAGE =
@@ -107,6 +110,31 @@ public class ConfigManager {
 
     /** Milliseconds between those readings. */
     private long pluginPacksStabilityIntervalMillis;
+
+    // -------------------------------------------------------------------------
+    // Datapack resource packs (auto-discovery)
+    // -------------------------------------------------------------------------
+
+    /** Where unlisted datapack aliases go in the merge order. */
+    public enum DatapackPosition { BOTTOM, TOP }
+
+    private boolean datapacksEnabled;
+    private boolean datapacksOnlyEnabled;
+    private List<String> datapacksExtraFolders = List.of();
+    private DatapackPosition datapacksPosition = DatapackPosition.BOTTOM;
+    private boolean datapacksWatch;
+    private int datapacksStabilityPolls;
+    private long datapacksStabilityIntervalMillis;
+    private sh.pcx.packmerger.datapack.ZipLimits zipLimits = sh.pcx.packmerger.datapack.ZipLimits.DEFAULTS;
+    private boolean modrinthEnabled;
+    private String modrinthApiUrl;
+    private List<String> modrinthAllowedHosts = List.of();
+    private boolean modrinthIncludeOptional;
+    private boolean modrinthAutoApprove;
+    private List<String> modrinthTrustedProjects = List.of();
+    private int modrinthTimeoutSeconds;
+    private int modrinthMaxDownloadMb;
+    private int modrinthLookupCacheHours;
 
     // -------------------------------------------------------------------------
     // Bedrock (Geyser) conversion
@@ -244,6 +272,9 @@ public class ConfigManager {
     /** The removed distribution.cache notice is logged once per server start, not on every reload. */
     private boolean cacheNoticeLogged;
 
+    /** The "players are not forced to download the pack" hint is logged once per server start. */
+    private boolean forcedHintLogged;
+
     /** Custom prompt message shown to players (MiniMessage format). Empty = Minecraft default. */
     private String promptMessage;
 
@@ -298,10 +329,10 @@ public class ConfigManager {
     // Update check
     // -------------------------------------------------------------------------
 
-    /** Whether to poll versions.json on plugin enable to surface newer releases. */
+    /** Whether to check GitHub for a newer release on plugin enable. */
     private boolean updateCheckEnabled;
 
-    /** URL of the versions.json manifest; defaults to the PackMerger repo. */
+    /** Update source: GitHub release JSON (default: this fork's latest release) or a versions.json manifest. */
     private String updateCheckUrl;
 
     /**
@@ -328,6 +359,7 @@ public class ConfigManager {
         // silently fall back to defaults below; this makes that explicit instead
         // of invisible. (configs predating this field read as version 0.)
         int configVersion = config.getInt("config-version", 0);
+        zeroConfigDefaults = usesZeroConfigDefaults(configVersion);
         if (configVersion < CURRENT_CONFIG_VERSION) {
             plugin.getLogger().log(Level.INFO,
                     "config.yml reports version " + configVersion + " (current is " + CURRENT_CONFIG_VERSION
@@ -463,13 +495,20 @@ public class ConfigManager {
 
         // Distribution settings
         distributionEnabled = config.getBoolean("distribution.enabled", true);
-        required = config.getBoolean("distribution.required", false);
+        // Forced download is the default since config-version 8. A key missing from an
+        // older config keeps the old default (false); an explicit value is never changed.
+        required = config.getBoolean("distribution.required", zeroConfigDefaults);
         promptMessage = config.getString("distribution.prompt-message", "");
         useAddResourcePack = config.getBoolean("distribution.use-add-resource-pack", false);
         joinDelayTicks = config.getInt("distribution.join-delay-ticks", 20);
-        enforceRequired = config.getBoolean("distribution.enforce-required.enabled", false);
+        enforceRequired = config.getBoolean("distribution.enforce-required.enabled", zeroConfigDefaults);
         enforceKickMessage = config.getString("distribution.enforce-required.kick-message",
                 DEFAULT_KICK_MESSAGE);
+        String forcedHint = forcedDownloadHint(distributionEnabled, required, enforceRequired);
+        if (forcedHint != null && !forcedHintLogged) {
+            forcedHintLogged = true;
+            plugin.getLogger().log(Level.INFO, forcedHint);
+        }
         retryMaxAttempts = Math.max(0, config.getInt("distribution.retry.max-attempts", 3));
         retryDelayTicks = Math.max(1, config.getInt("distribution.retry.delay-ticks", 40));
         skipBedrockPlayers = config.getBoolean("distribution.skip-bedrock-players", true);
@@ -554,6 +593,38 @@ public class ConfigManager {
             }
         }
 
+        // Datapack resource packs — on by default; every key has its default here, so
+        // configs older than config-version 7 get the feature without a rewrite.
+        datapacksEnabled = config.getBoolean("datapacks.enabled", true);
+        datapacksOnlyEnabled = config.getBoolean("datapacks.only-enabled", true);
+        datapacksExtraFolders = List.copyOf(config.getStringList("datapacks.extra-folders").stream()
+                .filter(s -> s != null && !s.isBlank()).toList());
+        datapacksPosition = "top".equalsIgnoreCase(config.getString("datapacks.position", "bottom"))
+                ? DatapackPosition.TOP : DatapackPosition.BOTTOM;
+        datapacksWatch = config.getBoolean("datapacks.watch", true);
+        datapacksStabilityPolls = Math.max(1, config.getInt("datapacks.stability.polls", 3));
+        datapacksStabilityIntervalMillis = Math.max(0, config.getLong("datapacks.stability.interval-millis", 1000));
+        zipLimits = sh.pcx.packmerger.datapack.ZipLimits.ofMegabytes(
+                config.getLong("datapacks.limits.max-file-mb", 200),
+                config.getLong("datapacks.limits.max-uncompressed-mb", 512),
+                config.getLong("datapacks.limits.max-entry-mb", 64),
+                config.getInt("datapacks.limits.max-entries", 50_000),
+                config.getInt("datapacks.limits.max-compression-ratio", 100));
+        String mr = "datapacks.external.modrinth.";
+        modrinthEnabled = config.getBoolean(mr + "enabled", true);
+        modrinthApiUrl = config.getString(mr + "api-url", "https://api.modrinth.com/v2");
+        modrinthAllowedHosts = config.isList(mr + "allowed-hosts")
+                ? lowerNonBlank(config.getStringList(mr + "allowed-hosts")) : List.of("cdn.modrinth.com");
+        modrinthIncludeOptional = config.getBoolean(mr + "include-optional", false);
+        // Default true since config-version 8 (zero config); an older config without the key
+        // keeps the old default, and an explicit value is always honoured.
+        modrinthAutoApprove = config.getBoolean(mr + "auto-approve", zeroConfigDefaults);
+        // Project IDs are case-sensitive and compared exactly; slugs are not accepted.
+        modrinthTrustedProjects = trimmedNonBlank(config.getStringList(mr + "trusted-projects"));
+        modrinthTimeoutSeconds = Math.max(1, config.getInt(mr + "timeout-seconds", 20));
+        modrinthMaxDownloadMb = Math.max(1, config.getInt(mr + "max-download-mb", 100));
+        modrinthLookupCacheHours = Math.max(0, config.getInt(mr + "lookup-cache-hours", 24));
+
         // Bedrock (Geyser) conversion — off by default
         bedrockEnabled = config.getBoolean("bedrock.enabled", false);
         bedrockAutoDeploy = config.getBoolean("bedrock.auto-deploy-to-geyser", true);
@@ -570,10 +641,48 @@ public class ConfigManager {
         // Logging
         logLevel = config.getString("log-level", "info");
 
-        // Update check
+        // Update check. The URL the upstream plugin shipped as default (pcxgg's
+        // versions.json) is replaced by this fork's releases: it is a default nobody chose,
+        // and it would tell admins to "update" to the upstream build.
         updateCheckEnabled = config.getBoolean("update-check.enabled", true);
-        updateCheckUrl = config.getString("update-check.url",
-                "https://raw.githubusercontent.com/pcxgg/PackMerger/master/versions.json");
+        updateCheckUrl = migrateUpdateCheckUrl(config.getString("update-check.url",
+                sh.pcx.packmerger.update.UpdateChecker.DEFAULT_URL));
+    }
+
+    /** The update-check URL shipped by upstream PackMerger before this fork. */
+    static final String UPSTREAM_UPDATE_URL = "https://raw.githubusercontent.com/pcxgg/PackMerger/master/versions.json";
+
+    /** @return {@code url}, or this fork's default when it is empty or upstream's old default */
+    static String migrateUpdateCheckUrl(String url) {
+        if (url == null || url.isBlank() || url.trim().equals(UPSTREAM_UPDATE_URL)) {
+            return sh.pcx.packmerger.update.UpdateChecker.DEFAULT_URL;
+        }
+        return url.trim();
+    }
+
+    /**
+     * @return {@code true} if keys missing from a config of this version take the
+     *         zero-config defaults (forced download, Modrinth auto-approve); configs
+     *         written before config-version 8 keep the defaults they were written for
+     */
+    static boolean usesZeroConfigDefaults(int configVersion) {
+        return configVersion >= 8;
+    }
+
+    /**
+     * @return a one-line startup hint when players are not forced to download the pack
+     *         (distribution on, but {@code required} or {@code enforce-required} off), or
+     *         {@code null} when the pack is forced or not sent at all
+     */
+    static String forcedDownloadHint(boolean distributionEnabled, boolean required, boolean enforce) {
+        if (!distributionEnabled || (required && enforce)) return null;
+        List<String> off = new ArrayList<>();
+        if (!required) off.add("distribution.required");
+        if (!enforce) off.add("distribution.enforce-required.enabled");
+        return "Players are not forced to download the resource pack (" + String.join(" and ", off)
+                + (off.size() == 1 ? " is" : " are") + " false). To kick players who decline it or cannot "
+                + "download it, set distribution.required: true and distribution.enforce-required.enabled: true "
+                + "in config.yml, then run /pm reload.";
     }
 
     /**
@@ -695,6 +804,77 @@ public class ConfigManager {
 
     /** @return milliseconds between stability readings (default 1000) */
     public long getPluginPacksStabilityIntervalMillis() { return pluginPacksStabilityIntervalMillis; }
+
+    private static List<String> trimmedNonBlank(List<String> in) {
+        List<String> out = new ArrayList<>();
+        for (String s : in) {
+            if (s != null && !s.isBlank()) out.add(s.trim());
+        }
+        return List.copyOf(out);
+    }
+
+    private static List<String> lowerNonBlank(List<String> in) {
+        List<String> out = new ArrayList<>();
+        for (String s : in) {
+            if (s != null && !s.isBlank()) out.add(s.trim().toLowerCase(Locale.ROOT));
+        }
+        return List.copyOf(out);
+    }
+
+    // -------------------------------------------------------------------------
+    // Getters — Datapack resource packs
+    // -------------------------------------------------------------------------
+
+    /** @return whether datapack resource packs are discovered and merged (default true) */
+    public boolean isDatapacksEnabled() { return datapacksEnabled; }
+
+    /** @return merge only datapacks the server has enabled (default true) */
+    public boolean isDatapacksOnlyEnabled() { return datapacksOnlyEnabled; }
+
+    /** @return extra folders to scan, as written in config (relative to the server folder or absolute) */
+    public List<String> getDatapacksExtraFolders() { return datapacksExtraFolders; }
+
+    /** @return where unlisted datapack aliases go in the merge order (default bottom) */
+    public DatapackPosition getDatapacksPosition() { return datapacksPosition; }
+
+    /** @return re-scan when a datapack changes on disk (default true) */
+    public boolean isDatapacksWatch() { return datapacksWatch; }
+
+    /** @return identical readings required before a changed datapack is read (default 3) */
+    public int getDatapacksStabilityPolls() { return datapacksStabilityPolls; }
+
+    /** @return milliseconds between those readings (default 1000) */
+    public long getDatapacksStabilityIntervalMillis() { return datapacksStabilityIntervalMillis; }
+
+    /** @return reading limits for datapacks and downloaded packs */
+    public sh.pcx.packmerger.datapack.ZipLimits getZipLimits() { return zipLimits; }
+
+    /** @return whether datapacks are looked up on Modrinth by hash (default true) */
+    public boolean isModrinthEnabled() { return modrinthEnabled; }
+
+    /** @return the Modrinth API base URL */
+    public String getModrinthApiUrl() { return modrinthApiUrl; }
+
+    /** @return hosts downloads (and every redirect) may use, lowercase (default cdn.modrinth.com) */
+    public List<String> getModrinthAllowedHosts() { return modrinthAllowedHosts; }
+
+    /** @return also take resource packs marked optional (default false) */
+    public boolean isModrinthIncludeOptional() { return modrinthIncludeOptional; }
+
+    /** @return download found packs without approval (default true since config-version 8) */
+    public boolean isModrinthAutoApprove() { return modrinthAutoApprove; }
+
+    /** @return project ids/slugs approved automatically, lowercase (default none) */
+    public List<String> getModrinthTrustedProjects() { return modrinthTrustedProjects; }
+
+    /** @return per-request timeout in seconds (default 20) */
+    public int getModrinthTimeoutSeconds() { return modrinthTimeoutSeconds; }
+
+    /** @return largest download in MiB (default 100) */
+    public int getModrinthMaxDownloadMb() { return modrinthMaxDownloadMb; }
+
+    /** @return hours a lookup result (also "not found") is cached (default 24) */
+    public int getModrinthLookupCacheHours() { return modrinthLookupCacheHours; }
 
     // -------------------------------------------------------------------------
     // Getters — Bedrock
@@ -877,7 +1057,7 @@ public class ConfigManager {
     /** @return {@code true} (default) if the plugin should poll for newer releases on enable */
     public boolean isUpdateCheckEnabled() { return updateCheckEnabled; }
 
-    /** @return URL of the versions.json manifest to query */
+    /** @return URL of the update source to query (GitHub release JSON or versions.json manifest) */
     public String getUpdateCheckUrl() { return updateCheckUrl; }
 
     // -------------------------------------------------------------------------

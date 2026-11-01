@@ -1,20 +1,68 @@
 name: Release
 
+# A real release: push a tag v<version> (e.g. v1.4.0), or run this workflow by hand with a
+# version, which creates the tag v<version> on the selected branch's latest commit.
+# The tag decides the version: the jars and plugin.yml are built with it.
 on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to release without the leading v (e.g. 1.4.0); creates the tag v<version>
+        required: true
+        type: string
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.version || github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
-  build:
+  release:
+    name: Build and publish release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          # Full history and tags, for the previous-release compare link.
+          fetch-depth: 0
+
+      - name: Determine version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            version="${INPUT_VERSION#v}"
+            if git rev-parse -q --verify "refs/tags/v${version}" > /dev/null; then
+              echo "::error::Tag v${version} already exists; pick a new version."
+              exit 1
+            fi
+          else
+            version="${GITHUB_REF_NAME#v}"
+          fi
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "::error::'${version}' is not a version like 1.4.0 or 1.4.0-beta.1."
+            exit 1
+          fi
+          declared="$(sed -n "s/^[[:space:]]*version = '\([^']*\)'.*/\1/p" build.gradle | head -n 1)"
+          if [ "$declared" != "$version" ]; then
+            echo "::warning::build.gradle declares version '${declared}', the release is built as '${version}'. Bump build.gradle to keep them in sync."
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${version}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Java 25
         uses: actions/setup-java@v5
@@ -30,43 +78,79 @@ jobs:
         with:
           mockbukkit-ref: ''
 
-      # `build` runs the test suite before producing the shaded jar, so a
-      # tagged release can't ship if tests are red.
-      - name: Build shadow JAR
-        run: ./gradlew build
+      # `build` runs the test suite before producing the shaded jars, so a release can't
+      # ship if tests are red.
+      - name: Build and test
+        run: >-
+          ./gradlew build
+          --init-script .github/gradle/ci-version.init.gradle
+          -PpmVersion="${{ steps.version.outputs.version }}"
 
-      - name: Extract version from tag
-        id: version
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-
-      # Pull the matching "## [X.Y.Z]" section out of CHANGELOG.md so the
-      # release body mirrors what we maintain in-repo, rather than relying on
-      # GitHub's auto-generated notes (which, on a direct-to-master workflow
-      # without PRs, produce nothing but a compare link).
+      # Pull the matching "## [X.Y.Z]" section out of CHANGELOG.md so the release body
+      # mirrors what we maintain in-repo. Without a section, GitHub generates the notes.
       - name: Extract release notes from CHANGELOG
         id: notes
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
+          set -euo pipefail
           awk -v v="$VERSION" '
-            $0 ~ "^## \\[" v "\\]" { found = 1; next }
-            found && /^## \[/        { exit }
-            found                    { print }
+            index($0, "## [" v "]") == 1 { found = 1; next }
+            found && /^## \[/              { exit }
+            found                          { print }
           ' CHANGELOG.md > .release-notes.md
-          if [ ! -s .release-notes.md ]; then
-            echo "CHANGELOG.md has no section for version $VERSION" >&2
-            exit 1
+          if [ -s .release-notes.md ]; then
+            previous="$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude "$TAG" HEAD 2> /dev/null || true)"
+            if [ -n "$previous" ]; then
+              {
+                echo ""
+                echo "---"
+                echo "**Full Changelog**: https://github.com/${GITHUB_REPOSITORY}/compare/${previous}...${TAG}"
+              } >> .release-notes.md
+            fi
+            echo "from-changelog=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::CHANGELOG.md has no section '## [${VERSION}]'; using GitHub's generated notes."
+            echo "from-changelog=false" >> "$GITHUB_OUTPUT"
           fi
-          echo "" >> .release-notes.md
-          echo "---" >> .release-notes.md
-          echo "**Full Changelog**: https://github.com/${{ github.repository }}/compare/...${GITHUB_REF_NAME}" >> .release-notes.md
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
-        with:
-          name: PackMerger ${{ github.ref_name }}
-          files: |
-            packmerger-plugin/build/libs/packmerger-plugin-${{ steps.version.outputs.version }}.jar
-            packmerger-velocity/build/libs/packmerger-velocity-${{ steps.version.outputs.version }}.jar
-            packmerger-bungee/build/libs/packmerger-bungee-${{ steps.version.outputs.version }}.jar
-          body_path: .release-notes.md
-          make_latest: 'true'
+      - name: Create GitHub release
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+          FROM_CHANGELOG: ${{ steps.notes.outputs.from-changelog }}
+        run: |
+          set -euo pipefail
+          jars=(
+            "packmerger-plugin/build/libs/packmerger-plugin-${VERSION}.jar"
+            "packmerger-velocity/build/libs/packmerger-velocity-${VERSION}.jar"
+            "packmerger-bungee/build/libs/packmerger-bungee-${VERSION}.jar"
+          )
+          ls -l "${jars[@]}"
+
+          # A re-run for an existing release only replaces its jars.
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" "${jars[@]}" --clobber
+            exit 0
+          fi
+
+          args=(--title "PackMerger ${TAG}")
+          if [ "$FROM_CHANGELOG" = true ]; then
+            args+=(--notes-file .release-notes.md)
+          else
+            args+=(--generate-notes)
+          fi
+          # 1.4.0-beta.1 and similar are published as pre-releases, plain versions as latest.
+          if [[ "$VERSION" == *-* ]]; then
+            args+=(--prerelease)
+          else
+            args+=(--latest)
+          fi
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            # The tag doesn't exist yet: GitHub creates it on the built commit.
+            args+=(--target "$GITHUB_SHA")
+          else
+            args+=(--verify-tag)
+          fi
+          gh release create "$TAG" "${jars[@]}" "${args[@]}"

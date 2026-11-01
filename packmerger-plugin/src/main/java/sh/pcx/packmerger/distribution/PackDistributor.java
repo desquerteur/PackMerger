@@ -266,7 +266,7 @@ public class PackDistributor {
             case LOADED -> logger.debug(name + " successfully loaded the resource pack");
             case DECLINED -> {
                 logger.info(name + " declined the resource pack");
-                enforceRequired(player, "declined the required resource pack");
+                enforceRequired(player, decision.action(), "declined the required resource pack");
             }
             case RESEND -> {
                 long delay = config.getRetryDelayTicks();
@@ -281,7 +281,7 @@ public class PackDistributor {
                         + ") after " + decision.attempt() + " resend(s); giving up for this session. "
                         + "Check that the pack URL is reachable from the player's network ("
                         + urlForLog() + "). /pm apply " + name + " sends it again.");
-                enforceRequired(player, "could not download the required resource pack");
+                enforceRequired(player, decision.action(), "could not download the required resource pack");
             }
             case INVALID_URL -> logger.warning(name + " reported INVALID_URL for the resource pack ("
                     + urlForLog() + "). This is a hosting/URL configuration problem, not a timing one, "
@@ -309,10 +309,10 @@ public class PackDistributor {
         if (task == null) tracker.resendFinished(id);
     }
 
-    /** Kicks the player when the pack is required and enforcement is enabled. */
-    private void enforceRequired(Player player, String reason) {
+    /** Kicks the player when the pack is required and enforcement is enabled ({@link DeliveryTracker#kicks}). */
+    private void enforceRequired(Player player, DeliveryTracker.Action action, String reason) {
         ConfigManager config = plugin.getConfigManager();
-        if (!config.isRequired() || !config.isEnforceRequired()) return;
+        if (!DeliveryTracker.kicks(action, config.isRequired(), config.isEnforceRequired())) return;
         Component message = miniMessage.deserialize(config.getEnforceKickMessage());
         logger.info("Kicking " + player.getName() + ": " + reason + " (distribution.enforce-required)");
         player.getScheduler().run(plugin.getLoader(), scheduled -> {

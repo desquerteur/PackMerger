@@ -66,6 +66,19 @@ public final class DeliveryTracker {
     }
 
     /**
+     * Required-pack enforcement ({@code distribution.required} +
+     * {@code distribution.enforce-required.enabled}): a player who declines, or whose
+     * download still fails once the resends are used up, is kicked. {@code INVALID_URL}
+     * and {@code FAILED_RELOAD} never kick: they point at a hosting or pack problem that
+     * would lock every player out.
+     *
+     * @return {@code true} if this outcome kicks the player
+     */
+    public static boolean kicks(Action action, boolean required, boolean enforce) {
+        return required && enforce && (action == Action.DECLINED || action == Action.GAVE_UP);
+    }
+
+    /**
      * @param action      what to do
      * @param attempt     for {@link Action#RESEND}, the 1-based number of this resend;
      *                    for {@link Action#GAVE_UP}, how many resends were made

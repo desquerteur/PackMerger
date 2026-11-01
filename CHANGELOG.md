@@ -4,6 +4,136 @@ All notable changes to PackMerger are documented here. The format is loosely
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [1.4.0] - 2026-11-01
+
+First release of the fork **desquerteur/PackMerger** (based on pcxgg/PackMerger 1.3.0,
+MIT). Datapack resource packs: the resource packs that belong to the server's datapacks
+are found, merged and sent to players automatically. Zero configuration: drop resource
+packs into `plugins/PackMerger/packs/` and datapacks into the world's `datapacks/`
+folder, and every player has to download the merged pack.
+
+### Changed
+- **Forced download by default** (new installs): `distribution.required: true` and
+  `distribution.enforce-required.enabled: true`. A player who declines is kicked, and so
+  is a player whose download still fails after the retries; `INVALID_URL` and
+  `FAILED_RELOAD` never kick. Existing configs keep their values (a key missing from a
+  config older than config-version 8 keeps the old default), and PackMerger logs one
+  startup line naming the two settings when the pack is not forced.
+- **Modrinth resource packs are downloaded without approval by default**
+  (`datapacks.external.modrinth.auto-approve: true` for new installs); HTTPS, the host
+  allowlist, the size cap and SHA-512/SHA-1/size verification still apply to every file.
+  Set `auto-approve: false` to approve each file with `/pm sources approve`.
+- **Update check reads this fork's GitHub releases**
+  (`https://api.github.com/repos/desquerteur/PackMerger/releases/latest`; drafts,
+  pre-releases and `dev-*` builds are ignored), so the server never suggests "updating"
+  to the upstream build. The old upstream default URL in existing configs is replaced
+  automatically; a custom URL (GitHub release JSON or the `versions.json` manifest
+  format) is kept.
+- The startup merge always runs again (as before 1.4.0's input skipping), so Bedrock
+  conversion, `merge.output-copy-to` and `PackMergeStartedEvent` / `PackMergedEvent`
+  happen on every start; Bedrock and `output-copy-to` settings are part of the merge
+  inputs fingerprint.
+- `datapacks.position: bottom` puts datapack packs below server-specific `additional`
+  packs too, as the config comment always said.
+- `plugin.yml`: authors `PCX Network, desquerteur`, website points to the fork; Modrinth
+  and GitHub requests identify as `desquerteur/PackMerger/<version>`.
+
+### Added
+- **Datapack resource-pack discovery** (`datapacks:`, on by default): the level's
+  `datapacks/` folder, the `datapacks/` folder of every loaded world and
+  `datapacks.extra-folders` are scanned on startup, on `/pm scan`, when a datapack
+  file changes (`datapacks.watch`), when worlds load/unload and after
+  `/minecraft:reload` / `/datapack enable|disable`. Assets next to `data/`, a resource
+  pack folder or zip inside the datapack, and resource packs put into `datapacks/` are
+  staged into `packs/.datapack-packs/dp-<name>.zip` and merged like plugin packs. Only
+  `assets/`, `pack.png` and a resource-pack `pack.mcmeta` are copied — a datapack's
+  `data/` never reaches the resource pack; hybrid packs get a `pack.mcmeta` for the
+  running Minecraft version. Data-only datapacks are normal and only listed.
+- **`datapacks.position`** (`bottom`|`top`, default `bottom`): where datapack packs not
+  listed in `priority:` go.
+- **External resource packs from Modrinth** (`datapacks.external.modrinth`, on by
+  default): datapack zips are looked up by SHA-1; resource packs the author declared
+  (same-version `required-resource-pack` files, `required` dependencies on resource-pack
+  projects) are downloaded (`auto-approve: true`, the default) or, with
+  `auto-approve: false`, wait until an admin runs `/pm sources approve <id>` (or the
+  project ID is in `trusted-projects`). Approvals bind to the file's SHA-512 and are
+  stored in `external-sources.json`. Downloads are HTTPS-only, allowed-host-checked on every
+  redirect, size-capped, time-limited and verified (SHA-512, SHA-1, size). Privacy: the
+  datapacks' SHA-1 hashes are sent to `api.modrinth.com`; set `enabled: false` to stop it.
+- **Commands**: `/pm scan [refresh]`, `/pm sources [datapacks|pending]`,
+  `/pm sources info|approve|reject <id>`, `/pm conflicts [pack]`, `/pm rebuild`;
+  `/pm status` shows a `Datapacks:` line and pending approvals. New permission
+  `packmerger.sources.approve` (default op). Admins get a join notice when external
+  packs wait for approval.
+- **`/pm conflicts`** lists only real conflicts: byte-identical copies and cleanly merged
+  JSON are left out (provenance records gain optional `identical` / `warned` flags;
+  older sidecars still load). After a merge where a datapack pack lost files, one
+  `[DATAPACK] [conflicts]` line is logged.
+- **Skip unchanged merges**: automatic merges (watchers, rescans, API changes) are
+  skipped when the merge inputs (`output/<name>.inputs`) and the live pack are
+  unchanged. `/pm merge`, `/pm reload`, `/pm fetch`, `/pm rebuild`, the startup merge
+  and the API's `triggerMerge()` always merge.
+- `[DATAPACK]` log tag with fixed sub-categories (`[discovered]`, `[no-assets]`,
+  `[missing-dependency]`, `[unsupported]`, `[pending-approval]`, `[download-error]`,
+  `[validation-error]`, `[conflicts]`).
+
+### Security
+- Datapack resource packs are bounded in memory before they reach the merge: a
+  `.json`/`.mcmeta` file over 4 MiB is skipped, all staged datapack packs together may
+  hold 64 MiB of JSON, and `datapacks.limits.max-uncompressed-mb` caps them together, so
+  a crafted datapack cannot make the merge run out of memory.
+- A datapack resource pack's `pack.mcmeta` loses its `filter` section (and every key but
+  `pack`, `overlays`, `language`), so a datapack cannot hide vanilla assets for all players.
+- `trusted-projects` matches Modrinth project IDs exactly; slugs (which can be renamed
+  and taken over) are ignored with a warning.
+- Modrinth responses are read with a deadline covering the body (a half-open connection
+  can no longer hang a scan), each scan has a 2-minute request time budget, and after a
+  rate limit (`429`, low `X-Ratelimit-Remaining`) or a failed lookup no automatic scan asks
+  again before Modrinth's reset time / 5 minutes.
+- Hashes from Modrinth are validated when parsed (not 40/128 hex digits → ignored), and
+  one unreadable entry in `external-sources.json` no longer discards every decision.
+- Concurrent downloads of the same file (an approval during a scan) are serialised;
+  stale `.part` downloads and `pm-nested-*.zip` temp files are cleaned up.
+- Folder datapacks: NTFS junctions and other links that resolve outside the pack are not
+  followed.
+- `/pm sources approve|reject` is refused from command blocks, non-player entities and
+  `/execute as` (players with `packmerger.sources.approve`, the console and RCON only).
+
+### Fixed
+- The `pack.mcmeta` generated when no merged pack has one used `pack_format 46`
+  (1.21.4); it now uses the running server's format (`min_format`/`max_format` as well
+  for 1.21.9+ clients), or the newest known format for a server newer than this build.
+- A slow or unreachable Modrinth no longer blocks the server thread on `/stop` or a
+  merge: the network part of a datapack scan holds no lock, the startup merge waits only
+  for the local scan (cached results), and watchers are never started after the plugin
+  is disabled. The Modrinth HTTP client is closed on `/pm reload` and disable.
+- Datapack inspection results cached in `cache/datapacks/state.json` are discarded when
+  `datapacks.limits` or the plugin version change, and over-limit results are never
+  cached (raising a limit takes effect on `/pm reload`).
+- A folder inside a datapack counts as its resource pack only if it has `assets/` and no
+  `data/` of its own (a bundled sub-datapack no longer hides the real `resourcepack/`).
+- A copy of a datapack in a folder the server does not load no longer takes the plain
+  `dp-<name>` alias from the copy in the level folder.
+- When the first server tick comes later than 10 s, the datapack scan runs again once the
+  real world snapshot arrives (disabled datapacks and other worlds are seen).
+- The `.inputs` sidecar is deleted before a merge is committed, so a failed write can no
+  longer leave a stale fingerprint that skips a needed merge.
+- Scan bookkeeping is kept under one lock (no lost rescan, no empty report for a
+  concurrent `/pm scan`).
+- Staged hybrid datapack packs get a `pack.mcmeta` (newest known format) on a Minecraft
+  version newer than this build, like the merged pack.
+
+### Config
+- **config-version 8.** New defaults: `distribution.required: true`,
+  `distribution.enforce-required.enabled: true`,
+  `datapacks.external.modrinth.auto-approve: true`, `update-check.url` → this fork's GitHub
+  releases. Existing configs are never rewritten.
+- **config-version 7.** New `datapacks:` section (see config.yml). Every new key has its
+  default in code, so existing configs keep working unchanged and get the feature
+  enabled; no rewrite of `config.yml` happens.
+
 ## [1.3.0] - 2026-10-13
 
 Delivery reliability: every player gets the pack, every time, and the pack that is

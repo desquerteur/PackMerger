@@ -227,16 +227,9 @@ public class PackMergeEngine {
 
         // Step 6: Ensure a pack.mcmeta exists — Minecraft requires it for valid resource packs
         if (!mergedFiles.containsKey("pack.mcmeta")) {
-            logger.merge("No pack.mcmeta found, generating default");
-            // pack_format 46 corresponds to Minecraft 1.21.4+
-            String defaultMcmeta = """
-                    {
-                      "pack": {
-                        "pack_format": 46,
-                        "description": "Merged resource pack by PackMerger"
-                      }
-                    }""";
-            mergedFiles.put("pack.mcmeta", defaultMcmeta.getBytes(StandardCharsets.UTF_8));
+            String mcVersion = PackValidator.getMinecraftVersion();
+            logger.merge("No pack.mcmeta found, generating default for Minecraft " + mcVersion);
+            mergedFiles.put("pack.mcmeta", defaultMcmeta(mcVersion).getBytes(StandardCharsets.UTF_8));
             provenance.recordExternal("pack.mcmeta", "<generated:default>");
         }
 
@@ -280,6 +273,17 @@ public class PackMergeEngine {
         writeProvenance(outputFile, this.lastProvenance);
 
         return outputFile;
+    }
+
+    /**
+     * The {@code pack.mcmeta} generated when no merged pack provides one: the format of
+     * the running Minecraft version, or the newest format the registry knows when the
+     * version is not in it (a server newer than this build).
+     */
+    static String defaultMcmeta(String mcVersion) {
+        int format = PackFormatRegistry.forMinecraftVersion(mcVersion);
+        if (format < 0) format = PackFormatRegistry.newestKnown();
+        return PackFormatRegistry.mcmetaFor(format, "Merged resource pack by PackMerger");
     }
 
     /**
@@ -362,11 +366,37 @@ public class PackMergeEngine {
         addStagedAliases(new File(packsFolder, ".plugin-packs"), packs);
         // And packs registered by other plugins through the API.
         addStagedAliases(new File(packsFolder, ".api-packs"), packs);
+        // And the resource-pack parts of the server's datapacks.
+        addStagedAliases(new File(packsFolder, DATAPACK_STAGE_DIR), packs);
         return packs;
     }
 
+    /** Sub-directory of {@code packs/} holding staged datapack assets (see DatapackPackManager). */
+    public static final String DATAPACK_STAGE_DIR = ".datapack-packs";
+
+    /** @return the aliases currently staged from datapacks (empty if none) */
+    public static Set<String> datapackAliases(File packsFolder) {
+        List<String> out = new ArrayList<>();
+        addStagedAliases(new File(packsFolder, DATAPACK_STAGE_DIR), out);
+        return new HashSet<>(out);
+    }
+
+    /**
+     * The merge order the next merge would use (highest priority first), without
+     * merging. Used for the input fingerprint.
+     */
+    public List<String> resolvedOrder() {
+        File packsFolder = plugin.getPacksFolder();
+        return buildPackOrder(discoverPacks(packsFolder), plugin.getConfigManager());
+    }
+
+    /** @return the file or folder a pack name resolves to (see {@link #resolvedOrder()}) */
+    public File resolve(String packName) {
+        return resolvePackFile(plugin.getPacksFolder(), packName);
+    }
+
     /** Adds every {@code <alias>.zip} in a staging dir to {@code packs} as "{@code <alias>}". */
-    private void addStagedAliases(File stageDir, List<String> packs) {
+    private static void addStagedAliases(File stageDir, List<String> packs) {
         if (!stageDir.isDirectory()) return;
         File[] cached = stageDir.listFiles();
         if (cached == null) return;
@@ -393,6 +423,8 @@ public class PackMergeEngine {
         if (pluginStaged.exists()) return pluginStaged;
         File apiStaged = new File(new File(packsFolder, ".api-packs"), packName + ".zip");
         if (apiStaged.exists()) return apiStaged;
+        File datapackStaged = new File(new File(packsFolder, DATAPACK_STAGE_DIR), packName + ".zip");
+        if (datapackStaged.exists()) return datapackStaged;
         return direct;  // return the direct path so the "not found" warning still has a sensible message
     }
 
@@ -414,11 +446,27 @@ public class PackMergeEngine {
      * @return the final ordered list (first = highest priority)
      */
     private List<String> buildPackOrder(List<String> available, ConfigManager config) {
-        List<String> priority = new ArrayList<>(config.getPriority());
+        return orderPacks(available, config.getPriority(), config.getServerPackConfig(),
+                datapackAliases(plugin.getPacksFolder()), config.getDatapacksPosition());
+    }
+
+    /**
+     * Pure form of {@link #buildPackOrder}. Unlisted datapack aliases are placed after
+     * every other pack, server-specific {@code additional} packs included ({@code BOTTOM}),
+     * or before the first listed pack ({@code TOP}); aliases written into
+     * {@code priority} keep their listed place.
+     *
+     * @param datapackAliases aliases staged from datapacks
+     * @param position        where unlisted datapack aliases go
+     * @return the final ordered list (first = highest priority)
+     */
+    static List<String> orderPacks(List<String> available, List<String> priorityList,
+                                   ConfigManager.ServerPackConfig serverConfig, Set<String> datapackAliases,
+                                   ConfigManager.DatapackPosition position) {
+        List<String> priority = new ArrayList<>(priorityList);
         List<String> ordered = new ArrayList<>();
 
         // Resolve per-server include/exclude rules
-        ConfigManager.ServerPackConfig serverConfig = config.getServerPackConfig();
         Set<String> excluded = new HashSet<>();
         List<String> additional = new ArrayList<>();
 
@@ -437,19 +485,30 @@ public class PackMergeEngine {
         // Second pass: add packs that exist on disk but aren't in any config list
         // These are sorted by filename (so numeric prefixes like 01_, 02_ are respected)
         List<String> unlisted = new ArrayList<>();
+        List<String> unlistedDatapacks = new ArrayList<>();
         for (String pack : available) {
             if (!priority.contains(pack) && !additional.contains(pack) && !excluded.contains(pack)) {
-                unlisted.add(pack);
+                (datapackAliases.contains(pack) ? unlistedDatapacks : unlisted).add(pack);
             }
         }
         Collections.sort(unlisted);
+        Collections.sort(unlistedDatapacks);
         ordered.addAll(unlisted);
+        if (position == ConfigManager.DatapackPosition.TOP) {
+            ordered.addAll(0, unlistedDatapacks);
+        }
 
         // Third pass: add server-specific additional packs at lowest priority (below global)
         for (String pack : additional) {
             if (available.contains(pack) && !ordered.contains(pack)) {
                 ordered.add(pack);
             }
+        }
+
+        // "bottom" datapack packs go below everything, server-specific packs included,
+        // so every pack the admin configured wins against them.
+        if (position != ConfigManager.DatapackPosition.TOP) {
+            ordered.addAll(unlistedDatapacks);
         }
 
         return ordered;
@@ -613,9 +672,10 @@ public class PackMergeEngine {
                              String packName, MergeProvenance.Builder provenance) {
         MergeStrategy strategy = findStrategy(path);
         if (strategy == null) {
-            // Non-JSON or non-mergeable file: higher priority replaces lower priority (last write wins)
-            mergedFiles.put(path, data);
-            provenance.record(path, packName, null, false);
+            // Non-JSON or non-mergeable file: higher priority replaces lower priority (last write wins).
+            // Byte-identical copies are flagged so /pm conflicts does not list them.
+            byte[] previous = mergedFiles.put(path, data);
+            provenance.record(path, packName, null, false, previous != null && Arrays.equals(previous, data));
             return;
         }
 
@@ -624,8 +684,8 @@ public class PackMergeEngine {
         if (newJson == null) {
             // Invalid JSON in a mergeable path — fall back to raw overwrite with a warning
             logger.warning("Invalid JSON in mergeable file (using raw): " + path);
-            mergedFiles.put(path, data);
-            provenance.record(path, packName, null, false);
+            byte[] previous = mergedFiles.put(path, data);
+            provenance.record(path, packName, null, false, previous != null && Arrays.equals(previous, data));
             return;
         }
 
@@ -637,7 +697,7 @@ public class PackMergeEngine {
             MergeContext ctx = new MergeContext(path, packName, provenance.winnerOf(path),
                     msg -> {
                         logger.warning(msg);
-                        provenance.note(path, msg);
+                        provenance.warn(path, msg);
                     },
                     msg -> {
                         logger.debug("Merge note for " + path + ": " + msg);
@@ -675,6 +735,11 @@ public class PackMergeEngine {
      * @return {@code true} if the file is junk
      */
     private boolean isJunkFile(String path) {
+        return isJunkPath(path);
+    }
+
+    /** Static form of {@link #isJunkFile}, shared with datapack asset extraction. */
+    public static boolean isJunkPath(String path) {
         String lower = path.toLowerCase().replace('\\', '/');
         String fileName = lower.contains("/") ? lower.substring(lower.lastIndexOf('/') + 1) : lower;
 

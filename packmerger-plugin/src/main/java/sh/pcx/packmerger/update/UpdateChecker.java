@@ -15,15 +15,19 @@ import java.util.Objects;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * Polls a {@code versions.json} manifest hosted in the PackMerger GitHub repo
- * on plugin enable and notifies admins when a newer release is available.
+ * Checks on plugin enable whether a newer release of this fork
+ * (<a href="https://github.com/desquerteur/PackMerger">desquerteur/PackMerger</a>) is
+ * available and notifies admins.
  *
- * <p>The manifest format is intentionally minimal:</p>
+ * <p>The default source is GitHub's "latest release" API for the fork, which only
+ * returns full releases (never drafts or pre-releases, so the {@code dev-*} builds of
+ * every push are ignored; a {@code dev-*} tag is also skipped defensively). A custom
+ * {@code update-check.url} may instead point at a minimal manifest:</p>
  * <pre>
  * {
- *   "latest": "1.3.0",
- *   "latest_url": "https://www.spigotmc.org/resources/packmerger.132700/updates",
- *   "latest_notes": "Auto plugin-pack discovery, Bedrock/Geyser, Velocity proxy, Paper 26.1.2"
+ *   "latest": "1.4.0",
+ *   "latest_url": "https://github.com/desquerteur/PackMerger/releases/tag/v1.4.0",
+ *   "latest_notes": "Datapack resource packs, zero config"
  * }
  * </pre>
  *
@@ -33,9 +37,9 @@ import java.util.concurrent.atomic.AtomicReference;
  */
 public class UpdateChecker {
 
-    /** Default manifest location in the PackMerger repo's default branch. */
+    /** Default source: the fork's latest full release on GitHub. */
     public static final String DEFAULT_URL =
-            "https://raw.githubusercontent.com/pcxgg/PackMerger/master/versions.json";
+            "https://api.github.com/repos/desquerteur/PackMerger/releases/latest";
 
     private final PackMergerBootstrap plugin;
     private final PluginLogger logger;
@@ -61,46 +65,88 @@ public class UpdateChecker {
             HttpRequest req = HttpRequest.newBuilder()
                     .uri(URI.create(manifestUrl))
                     .timeout(Duration.ofSeconds(15))
-                    .header("User-Agent", "PackMerger-UpdateChecker/1.0")
+                    .header("User-Agent", userAgent(runningVersion))
+                    .header("Accept", "application/vnd.github+json, application/json")
                     .GET()
                     .build();
             HttpResponse<String> resp = client.send(req, HttpResponse.BodyHandlers.ofString());
+            if (resp.statusCode() == 404) {
+                logger.debug("[update] no release published yet; skipping");
+                return;
+            }
             if (resp.statusCode() < 200 || resp.statusCode() >= 300) {
-                logger.debug("[update] manifest returned HTTP " + resp.statusCode() + "; skipping");
+                logger.debug("[update] update source returned HTTP " + resp.statusCode() + "; skipping");
                 return;
             }
 
-            JsonElement parsed = JsonParser.parseString(resp.body());
-            if (!parsed.isJsonObject()) {
-                logger.debug("[update] manifest is not a JSON object; skipping");
+            Result result = parse(resp.body(), runningVersion);
+            if (result == null) {
+                logger.debug("[update] update source has no usable release version; skipping");
                 return;
             }
-            JsonObject root = parsed.getAsJsonObject();
-            String latest = root.has("latest") && !root.get("latest").isJsonNull()
-                    ? root.get("latest").getAsString() : null;
-            if (latest == null) {
-                logger.debug("[update] manifest missing 'latest' field; skipping");
-                return;
-            }
-            String latestUrl = root.has("latest_url") && !root.get("latest_url").isJsonNull()
-                    ? root.get("latest_url").getAsString() : null;
-            String notes = root.has("latest_notes") && !root.get("latest_notes").isJsonNull()
-                    ? root.get("latest_notes").getAsString() : null;
-
-            Result result = new Result(runningVersion, latest, latestUrl, notes,
-                    compareVersions(runningVersion, latest) < 0);
             latestResult.set(result);
 
             if (result.updateAvailable()) {
                 logger.warning("[update] newer PackMerger release available: "
                         + result.latest() + " (running " + runningVersion + ")");
-                if (latestUrl != null) logger.warning("[update] release: " + latestUrl);
+                if (result.url() != null) logger.warning("[update] release: " + result.url());
             } else {
                 logger.info("[update] PackMerger is up to date (" + runningVersion + ")");
             }
         } catch (Exception e) {
             logger.debug("[update] check failed: " + e.getMessage());
         }
+    }
+
+    /** @return the User-Agent sent to GitHub (its API refuses requests without one) */
+    static String userAgent(String runningVersion) {
+        return "desquerteur/PackMerger/" + runningVersion + " (update-check; +https://github.com/desquerteur/PackMerger)";
+    }
+
+    /**
+     * Reads either a GitHub release object ({@code tag_name}, {@code html_url},
+     * {@code name}, {@code prerelease}) or a manifest ({@code latest},
+     * {@code latest_url}, {@code latest_notes}).
+     *
+     * @return the result, or {@code null} for anything that is not a usable full release
+     *         (no version, a draft or pre-release, or a {@code dev-*} build)
+     */
+    static Result parse(String body, String runningVersion) {
+        JsonElement parsed;
+        try {
+            parsed = JsonParser.parseString(body);
+        } catch (RuntimeException e) {
+            return null;
+        }
+        if (!parsed.isJsonObject()) return null;
+        JsonObject root = parsed.getAsJsonObject();
+        String latest;
+        String url;
+        String notes;
+        if (root.has("tag_name")) {
+            if (bool(root, "prerelease") || bool(root, "draft")) return null;
+            String tag = str(root, "tag_name");
+            if (tag == null || tag.startsWith("dev-")) return null;
+            latest = tag.startsWith("v") || tag.startsWith("V") ? tag.substring(1) : tag;
+            url = str(root, "html_url");
+            notes = str(root, "name");
+        } else {
+            latest = str(root, "latest");
+            url = str(root, "latest_url");
+            notes = str(root, "latest_notes");
+        }
+        if (latest == null || latest.isBlank() || !Character.isDigit(latest.charAt(0))) return null;
+        return new Result(runningVersion, latest, url, notes, compareVersions(runningVersion, latest) < 0);
+    }
+
+    private static String str(JsonObject o, String key) {
+        JsonElement e = o.get(key);
+        return e == null || e.isJsonNull() || !e.isJsonPrimitive() ? null : e.getAsString();
+    }
+
+    private static boolean bool(JsonObject o, String key) {
+        JsonElement e = o.get(key);
+        return e != null && e.isJsonPrimitive() && e.getAsJsonPrimitive().isBoolean() && e.getAsBoolean();
     }
 
     /** @return the most recent check's result, or {@code null} if none completed */

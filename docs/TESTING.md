@@ -53,6 +53,65 @@ Run against a real server before tagging a release. The plugin advertises
 5. Drop a pack into `packs/`, wait for hot-reload (debounce), confirm a re-merge.
 6. Join with a client — the resource pack is sent and applies.
 
+### Datapack resource packs (Paper 26.2)
+
+The pure parts (safe zip reading, inspection, extraction, staging, locator helpers,
+merge order, input fingerprint, conflicts, Modrinth client/resolver, verified download,
+approval store) are unit-tested under `sh.pcx.packmerger.datapack`, `…merge`,
+`…remote` and `…commands`. These steps need a real server and client. Use a fresh
+install (the default config forces the pack: `distribution.required: true` and
+`distribution.enforce-required.enabled: true`, Modrinth `auto-approve: true`).
+
+Fixtures: a hybrid datapack (`data/` + `assets/`, e.g. a test zip with
+`assets/pmtest/textures/item/marker.png` that retextures a vanilla item), a data-only
+datapack, and one datapack from Modrinth that declares a resource pack.
+
+1. **Startup**: put the hybrid and the data-only datapack into `world/datapacks/`, start
+   the server. Console: `[DATAPACK] [discovered] dp-<hybrid> ← world/datapacks/…`, a
+   summary line, and the merge includes `dp-<hybrid>`. `/pm sources datapacks` lists the
+   data-only pack as `data-only`. Open `output/merged-pack.zip`: the hybrid's
+   `assets/` are there, **no `data/` folder**, `pack.mcmeta` declares format 88.
+   Record here what `World#getWorldFolder()` returned for the nether/end (debug log of
+   `/pm sources datapacks` paths) and whether the datapack ids are `file/<name>`.
+2. **Player join**: join with a client — the pack is offered and the hybrid's texture is
+   visible in game.
+3. **Declined pack → kick**: decline the pack prompt (or set server resource packs to
+   "Disabled" in the server list) — the player is kicked with the
+   `enforce-required.kick-message`.
+4. **Cached download**: rejoin without changes — the client does not download again (same
+   SHA-1); restart the server — the startup merge runs and logs `Merged pack SHA1: …
+   (unchanged)`; players' clients reuse their cached download.
+4b. **Download fails → kick**: block the pack port (or point `public-url` at a dead host
+   that still answers with a valid URL) — after 3 resends the player is kicked; an
+   `INVALID_URL` (e.g. `public-url: "not a url"`) does not kick.
+5. **Add at runtime**: copy another hybrid datapack into `world/datapacks/` (copy slowly,
+   e.g. over SFTP, to see the half-uploaded file being waited for). After the debounce:
+   one rescan, one merge, players get the new pack (`on-new-pack`).
+6. **Update at runtime**: replace the zip with a changed version → one re-merge.
+7. **Remove at runtime**: delete it → `removed stale staged pack 'dp-…'` and one re-merge.
+8. **Idle rescan**: `/pm scan` without changes → `Nothing changed.`, no merge, no upload.
+9. **/datapack disable "file/<name>"** → rescan; with `only-enabled: true` the pack is
+   skipped (`not enabled`) and removed from the merged pack. `/datapack enable` brings
+   it back.
+10. **Multiple worlds**: create a second world with Multiverse and put a hybrid datapack
+    into its `datapacks/` folder → listed as `folder not loaded by the server` and not
+    merged; with `datapacks.only-enabled: false` it is merged.
+11. **Modrinth**: add the Modrinth datapack → with the default `auto-approve: true` its
+    resource pack is downloaded, verified and merged without a command (also when
+    Modrinth is slow: the startup merge does not wait for it, a second merge follows).
+    Then set `auto-approve: false`, delete `external-sources.json` and
+    `cache/modrinth/`, `/pm reload`, run `/pm scan` → `! mr-… waiting
+    for approval`; an admin joining sees the pending notice. A command block running
+    `/pm sources approve all` is refused. `/pm sources info <id>`
+    shows URL/size/hashes. `/pm sources approve <id>` → `✓ verified sha512`, a merge, and
+    `dp-<name>-rp` in `/pm status`/`/pm sources`. Restart: the file is not downloaded
+    again (`cache/modrinth/<sha512>.zip`). `/pm sources reject <id>` on another entry →
+    it is not asked again.
+12. **Conflicts**: two packs with the same texture → `/pm conflicts` lists it with the
+    winner; identical copies are not listed.
+13. **Broken zip**: put a truncated zip into `world/datapacks/` → after a minute it is
+    reported as `corrupt zip` (`[validation-error]`), the merge still runs.
+
 ### Folia
 
 Repeat the above on a Folia build of the same version. Pay attention to:
