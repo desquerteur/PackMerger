@@ -1,5 +1,5 @@
 {
-  "latest": "1.4.0",
-  "latest_url": "https://github.com/desquerteur/PackMerger/releases/tag/v1.4.0",
-  "latest_notes": "Fork of pcxgg/PackMerger. Datapack resource packs found and merged automatically (incl. Modrinth dependencies), zero-config defaults: every player must download the merged pack. Since 1.4.0 the update check reads GitHub releases; this file is only used by a custom update-check.url."
+  "latest": "1.4.1",
+  "latest_url": "https://github.com/desquerteur/PackMerger/releases/tag/v1.4.1",
+  "latest_notes": "Fork of pcxgg/PackMerger. 1.4.1: zero-config self-host sends each player a pack URL built from the address they joined with (no more localhost URL), never sends loopback URLs to remote players, and stops kicking for failed downloads when hosting is broken. Since 1.4.0 the update check reads GitHub releases; this file is only used by a custom update-check.url."
 }

@@ -821,7 +821,10 @@ public class PackMergerCommand {
                 "port", String.valueOf(selfHost.getBoundPort()),
                 "state", selfHost.isRunning() ? "listening" : "NOT listening (port could not be bound)"));
         sh.pcx.packmerger.upload.SelfHostAddress.Resolution resolution = selfHost.getResolution();
-        if (resolution != null) {
+        if (resolution != null && selfHost.isPerPlayer()) {
+            sender.sendMessage(msg.getMessage("status.per-player-url",
+                    "port", String.valueOf(selfHost.getBoundPort()), "fallback", resolution.url()));
+        } else if (resolution != null) {
             sender.sendMessage(msg.getMessage("status.resolved-host",
                     "host", resolution.host(), "source", resolution.source().description()));
             if (!resolution.routable()) {

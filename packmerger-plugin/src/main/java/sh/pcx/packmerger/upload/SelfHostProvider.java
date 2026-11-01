@@ -33,7 +33,10 @@ import java.util.concurrent.atomic.AtomicReference;
  * that rewrites {@code output/} never changes the bytes behind an advertised SHA-1.</p>
  *
  * <p>The advertised URL is resolved by {@link SelfHostAddress} (public-url, public-host,
- * opt-in public IP lookup, server-ip, bind address). A non-routable result is logged as a
+ * opt-in public IP lookup, server-ip, bind address). With neither public-url nor
+ * public-host set and no proxy in front ({@link ProxySetup}), players are sent a URL built
+ * from the address they joined with instead ({@link PlayerPackUrl}, {@link #perPlayerPort});
+ * the resolved URL is then only a fallback. Otherwise a non-routable result is logged as a
  * warning on every upload. After each upload {@link #check(String)} verifies the URL by
  * downloading the first KiB through {@code 127.0.0.1} and through the advertised URL (the
  * second catches routers without NAT hairpinning, a closed firewall, or a reverse proxy
@@ -111,6 +114,18 @@ public class SelfHostProvider implements UploadProvider, UploadChain.Step {
     private volatile String detectedIp;
     private volatile boolean detectionDone;
 
+    /** Proxy settings that make the player's address useless for the pack URL ({@link ProxySetup}). */
+    private volatile List<String> proxySettings = List.of();
+
+    /** Per-player URLs configured: no public-url, no public-host, no proxy. */
+    private volatile boolean perPlayerConfigured;
+
+    /** Per-player URLs in force for the pack published by the last upload. */
+    private volatile boolean perPlayer;
+
+    /** Last logged URL-mode line, so it is printed once at startup and again only when it changes. */
+    private volatile String lastModeLine;
+
     public SelfHostProvider(PackMergerBootstrap plugin) {
         this.plugin = plugin;
         this.logger = plugin.getPluginLogger();
@@ -171,6 +186,11 @@ public class SelfHostProvider implements UploadProvider, UploadChain.Step {
             if (path != null && !path.equals("/")) p.add(path);
         }
         paths = Set.copyOf(p);
+
+        List<String> proxies = new ArrayList<>(ProxySetup.detect(new File(".")));
+        if (config.isProxyNotify()) proxies.add("distribution.proxy-notify");
+        proxySettings = List.copyOf(proxies);
+        perPlayerConfigured = publicUrl.isEmpty() && config.getSelfHostPublicHost().isEmpty() && proxies.isEmpty();
     }
 
     /**
@@ -209,6 +229,21 @@ public class SelfHostProvider implements UploadProvider, UploadChain.Step {
     /** @return the last reachability verification result (never {@code null}) */
     public Verification getVerification() {
         return verification;
+    }
+
+    /** @return {@code true} if players get a URL built from the address they joined with ({@link PlayerPackUrl}) */
+    public boolean isPerPlayer() {
+        return perPlayer;
+    }
+
+    /**
+     * @param publishedUrl the URL of the pack being sent
+     * @return the port to build a per-player URL with, or {@code -1} when the published URL
+     *         is not this provider's auto-built URL (explicit host, proxy, another provider)
+     */
+    public int perPlayerPort(String publishedUrl) {
+        SelfHostAddress.Resolution r = resolution;
+        return perPlayer && server != null && r != null && r.url().equals(publishedUrl) ? boundPort : -1;
     }
 
     /**
@@ -250,8 +285,20 @@ public class SelfHostProvider implements UploadProvider, UploadChain.Step {
                 java.util.UUID.randomUUID().toString().replace("-", "")));
 
         SelfHostAddress.Resolution r = resolveUrl();
+        boolean perPlayerNow = perPlayerConfigured;
         resolution = r;
-        if (!r.routable()) {
+        perPlayer = perPlayerNow;
+        String modeLine = PlayerPackUrl.modeLine(perPlayerNow, !proxySettings.isEmpty(), r, boundPort);
+        if (!proxySettings.isEmpty() && !perPlayerNow && r.source() != SelfHostAddress.Source.PUBLIC_URL
+                && r.source() != SelfHostAddress.Source.PUBLIC_HOST) {
+            modeLine += " Proxy detected: " + String.join(", ", proxySettings) + ".";
+        }
+        if (!modeLine.equals(lastModeLine)) {
+            lastModeLine = modeLine;
+            logger.upload(modeLine);
+        }
+        // In per-player mode the fixed URL is only a fallback for clients without a usable address.
+        if (!r.routable() && !perPlayerNow) {
             logger.warning("Self-host URL is not reachable from the internet: " + r.advice());
         }
         return r.url();
@@ -315,7 +362,8 @@ public class SelfHostProvider implements UploadProvider, UploadChain.Step {
     public String check(String url) {
         SelfHostAddress.Resolution r = resolution;
         boolean explicitUrl = r != null && r.source() == SelfHostAddress.Source.PUBLIC_URL;
-        String routeProblem = r != null && !r.routable() && !explicitUrl ? r.advice() : null;
+        // Per-player URLs don't use the auto host, so its routability is no reason to fall back.
+        String routeProblem = r != null && !r.routable() && !explicitUrl && !perPlayer ? r.advice() : null;
 
         Pending staged = pending.get();
         if (!plugin.getConfigManager().isSelfHostVerify()) {

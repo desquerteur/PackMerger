@@ -52,19 +52,32 @@ test('only the exact pack path is served', async () => {
   expect((await fetch(PACK_URL, { method: 'POST' })).status).toBe(405);
 });
 
-test('/pm status reports the hosting route, resolved host and a passed verification', async ({ server }) => {
+test('/pm status reports the hosting route, per-player URL mode and a passed verification', async ({ server }) => {
   const reply = await consoleCommand(server, 'pm status');
   expect(reply).toContain('Hosting route: self-host');
   expect(reply).toContain(`Self-host: port ${SELF_HOST_PORT}, listening`);
-  // server-ip is empty on the test server, so the bind address is advertised as localhost...
-  expect(reply).toContain('Resolved host: localhost (from bind address (nothing configured))');
-  // ...which external players can't reach: status says exactly what to set.
-  expect(reply).toContain('Not reachable from the internet');
-  expect(reply).toContain('Set upload.self-host.public-url');
+  // Nothing configured: each player gets a URL built from the address they joined with;
+  // the bind address (advertised as localhost) is only the fallback, so no warning.
+  expect(reply).toContain(`URL mode: per player, http://(address the player joined with):${SELF_HOST_PORT}/pack`);
+  expect(reply).toContain(`fallback http://localhost:${SELF_HOST_PORT}/pack`);
+  expect(reply).not.toContain('Not reachable from the internet');
   expect(reply).toMatch(/Verification: passed at \d{2}:\d{2}:\d{2} \(served on http:\/\/127\.0\.0\.1:\d+\/pack|Verification: passed at \d{2}:\d{2}:\d{2} \(local and advertised URL serve the pack\)/);
 });
 
-test('admins are told on join that the self-host URL is not reachable from the internet', async ({ player }) => {
+test('admins are told on join when a fixed public-host is not reachable from the internet', async ({ server, player, cleanup }) => {
+  const original = readFileSync(CONFIG, 'utf8');
+  cleanup(async () => {
+    writeFileSync(CONFIG, original);
+    const mark = serverLogMark(server);
+    await consoleCommand(server, 'pm reload');
+    await expect(server).toHaveReceivedMessage(`Pack uploaded successfully: ${PACK_URL}`, { since: mark, timeout: 20_000 });
+  });
+  const changed = original.replace(/^    public-host: (""|'')$/m, '    public-host: "localhost"');
+  expect(changed).not.toBe(original);
+  writeFileSync(CONFIG, changed);
+  const mark = serverLogMark(server);
+  await consoleCommand(server, 'pm reload');
+  await expect(server).toHaveReceivedMessage('Pack URL mode: fixed URL', { since: mark, timeout: 20_000 });
   await player.makeOp();
   await player.rejoin();
   await expect(player).toHaveReceivedMessage(/\[PackMerger\] The self-host URL http:\/\/localhost:\d+\/pack uses localhost/,

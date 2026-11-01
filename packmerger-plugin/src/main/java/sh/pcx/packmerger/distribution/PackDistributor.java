@@ -11,12 +11,18 @@ import sh.pcx.packmerger.PackMergerBootstrap;
 import sh.pcx.packmerger.PluginLogger;
 import sh.pcx.packmerger.api.events.PackSentToPlayerEvent;
 import sh.pcx.packmerger.config.ConfigManager;
+import sh.pcx.packmerger.upload.PlayerPackUrl;
+import sh.pcx.packmerger.upload.SelfHostProvider;
 
+import java.net.InetSocketAddress;
 import java.net.URI;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Sends the published pack to players and keeps delivery reliable.
@@ -32,7 +38,11 @@ import java.util.UUID;
  *       plugins.</li>
  *   <li>Status reports for PackMerger's pack drive a bounded self-heal resend on
  *       {@code FAILED_DOWNLOAD} / {@code DISCARDED}, and optional kick enforcement for
- *       required packs ({@link #handleStatus}).</li>
+ *       required packs ({@link #handleStatus}). Failed downloads stop kicking while
+ *       hosting looks broken ({@link DeliveryTracker#noteHosting}).</li>
+ *   <li>Each player gets the URL {@link PlayerPackUrl} picks: built from the address they
+ *       joined with in self-host per-player mode, else the published URL. A URL that only
+ *       works on this machine is not sent to remote players at all.</li>
  * </ul>
  *
  * <p>Every Bukkit player call is made on that player's entity scheduler, so methods
@@ -47,6 +57,12 @@ public class PackDistributor {
     private final MiniMessage miniMessage = MiniMessage.miniMessage();
     private final DeliveryTracker tracker;
     private final BedrockPlayers bedrockPlayers = new BedrockPlayers();
+
+    /** The URL each online player was last sent, for diagnostics. */
+    private final Map<UUID, String> sentUrls = new ConcurrentHashMap<>();
+
+    /** The unusable URL last warned about, so the warning is logged once and not on every join. */
+    private final AtomicReference<String> unusableWarned = new AtomicReference<>();
 
     public PackDistributor(PackMergerBootstrap plugin) {
         this.plugin = plugin;
@@ -72,6 +88,7 @@ public class PackDistributor {
     /** Called when a player quits. */
     public void onQuit(Player player) {
         tracker.onQuit(player.getUniqueId());
+        sentUrls.remove(player.getUniqueId());
     }
 
     /**
@@ -108,8 +125,14 @@ public class PackDistributor {
     /** Runs on the player's region thread. */
     private void deliver(Player player, ConfigManager config, PublishedPack pack, boolean forced) {
         try {
+            PlayerPackUrl.Choice choice = urlFor(player, pack);
+            if (choice.mode() == PlayerPackUrl.Mode.UNUSABLE) {
+                warnUnusable(player, choice.url());
+                return;
+            }
+            String url = choice.url();
             ResourcePackInfo packInfo = ResourcePackInfo.resourcePackInfo()
-                    .uri(URI.create(pack.url()))
+                    .uri(URI.create(url))
                     .hash(pack.sha1Hex())
                     .id(pack.packId())
                     .build();
@@ -131,11 +154,41 @@ public class PackDistributor {
             }
             player.sendResourcePacks(request.build());
             tracker.onSent(player.getUniqueId());
+            sentUrls.put(player.getUniqueId(), url);
 
-            logger.debug("Sent resource pack to " + player.getName() + " (URL: " + pack.url() + ")");
-            Bukkit.getPluginManager().callEvent(new PackSentToPlayerEvent(player, pack.url(), pack.sha1Hex(), forced));
+            logger.debug("Sent resource pack to " + player.getName() + " (URL: " + url
+                    + (choice.mode() == PlayerPackUrl.Mode.PER_PLAYER ? ", per-player" : "") + ")");
+            Bukkit.getPluginManager().callEvent(new PackSentToPlayerEvent(player, url, pack.sha1Hex(), forced));
         } catch (Exception e) {
             logger.warning("Failed to send resource pack to " + player.getName() + ": " + e.getMessage());
+        }
+    }
+
+    /** Picks the URL for this player (per-player self-host URL, else the published one). */
+    private PlayerPackUrl.Choice urlFor(Player player, PublishedPack pack) {
+        SelfHostProvider selfHost = plugin.getSelfHostProvider();
+        int port = selfHost == null ? -1 : selfHost.perPlayerPort(pack.url());
+        InetSocketAddress virtualHost = player.getVirtualHost();
+        return PlayerPackUrl.choose(pack.url(), port, virtualHost == null ? null : virtualHost.getHostString(),
+                isOnLoopback(player));
+    }
+
+    private static boolean isOnLoopback(Player player) {
+        InetSocketAddress address = player.getAddress();
+        return address != null && address.getAddress() != null && address.getAddress().isLoopbackAddress();
+    }
+
+    /** Logs (once per URL) why a player was not sent a URL that only works on this machine. */
+    private void warnUnusable(Player player, String url) {
+        String message = "Not sending the resource pack to " + player.getName() + ": its URL " + url
+                + " points at this machine itself, which a player connecting from another computer cannot"
+                + " reach. Set upload.self-host.public-url (full URL) or upload.self-host.public-host (host"
+                + " name or IP players can reach) in config.yml, then /pm reload. Players are not kicked for this.";
+        if (!url.equals(unusableWarned.getAndSet(url))) {
+            logger.warning(message);
+            plugin.alertAdmins("[PackMerger] " + message);
+        } else {
+            logger.debug(message);
         }
     }
 
@@ -263,7 +316,13 @@ public class PackDistributor {
                 DeliveryTracker.Status.of(event.getStatus().name()));
 
         switch (decision.action()) {
-            case LOADED -> logger.debug(name + " successfully loaded the resource pack");
+            case LOADED -> {
+                logger.debug(name + " successfully loaded the resource pack");
+                if (tracker.noteHosting(player.getUniqueId(), decision.action()) == DeliveryTracker.HostingChange.RESUMED) {
+                    logger.info(name + " loaded the resource pack, so the pack URL works again: players whose"
+                            + " download fails are kicked again (distribution.enforce-required).");
+                }
+            }
             case DECLINED -> {
                 logger.info(name + " declined the resource pack");
                 enforceRequired(player, decision.action(), "declined the required resource pack");
@@ -280,11 +339,16 @@ public class PackDistributor {
                 logger.warning("Resource pack delivery to " + name + " failed (last status " + event.getStatus()
                         + ") after " + decision.attempt() + " resend(s); giving up for this session. "
                         + "Check that the pack URL is reachable from the player's network ("
-                        + urlForLog() + "). /pm apply " + name + " sends it again.");
+                        + urlForLog(player) + "). /pm apply " + name + " sends it again.");
+                if (tracker.noteHosting(player.getUniqueId(), decision.action()) == DeliveryTracker.HostingChange.PAUSED) {
+                    String problem = hostingProblemMessage();
+                    logger.warning(problem);
+                    plugin.alertAdmins("[PackMerger] " + problem);
+                }
                 enforceRequired(player, decision.action(), "could not download the required resource pack");
             }
             case INVALID_URL -> logger.warning(name + " reported INVALID_URL for the resource pack ("
-                    + urlForLog() + "). This is a hosting/URL configuration problem, not a timing one, "
+                    + urlForLog(player) + "). This is a hosting/URL configuration problem, not a timing one, "
                     + "so PackMerger does not retry: check upload.self-host.public-url (or your S3/Polymath URL) "
                     + "is a full http(s) URL the client can reach.");
             case FAILED_RELOAD -> logger.warning(name + " downloaded the resource pack but the client failed to "
@@ -294,9 +358,35 @@ public class PackDistributor {
         }
     }
 
-    private String urlForLog() {
+    private String urlForLog(Player player) {
+        String sent = sentUrls.get(player.getUniqueId());
+        if (sent != null) return sent;
         PublishedPack pack = plugin.getPublishedPack();
         return pack == null ? "no pack published" : pack.url();
+    }
+
+    /**
+     * @return the admin warning for {@link DeliveryTracker.HostingChange#PAUSED}, or
+     *         {@code null} while failed downloads still kick
+     */
+    public String getHostingProblem() {
+        return tracker.downloadKicksPaused() ? hostingProblemMessage() : null;
+    }
+
+    private String hostingProblemMessage() {
+        SelfHostProvider selfHost = plugin.getSelfHostProvider();
+        String port = selfHost != null ? "TCP port " + selfHost.getBoundPort() : "the pack URL";
+        return "Resource pack downloads failed for " + tracker.failedPlayersSinceLoad() + " different players and"
+                + " nobody has loaded the pack since startup or the last successful download. This is a hosting"
+                + " problem, not a player problem: " + port + " is probably not reachable (blocked by the server"
+                + " machine's firewall, not forwarded on the router, or the server is behind a tunnel/proxy that only"
+                + " forwards the Minecraft port). Until a download works again, players whose download fails are NOT"
+                + " kicked (declining still kicks). Fix: "
+                + (selfHost != null
+                        ? "open " + port + " in the firewall of the server machine (LAN players need this too),"
+                          + " forward it on your router for internet players, or set upload.self-host.public-url."
+                        : "make sure the pack URL can be downloaded from your players' networks.")
+                + " /pm status shows the URL.";
     }
 
     /** Re-sends after a delay on the player's entity scheduler (cancelled with the player). */
@@ -309,10 +399,19 @@ public class PackDistributor {
         if (task == null) tracker.resendFinished(id);
     }
 
-    /** Kicks the player when the pack is required and enforcement is enabled ({@link DeliveryTracker#kicks}). */
+    /**
+     * Kicks the player when the pack is required and enforcement is enabled, unless failed
+     * downloads are paused because hosting looks broken ({@link DeliveryTracker#shouldKick}).
+     */
     private void enforceRequired(Player player, DeliveryTracker.Action action, String reason) {
         ConfigManager config = plugin.getConfigManager();
-        if (!DeliveryTracker.kicks(action, config.isRequired(), config.isEnforceRequired())) return;
+        if (!tracker.shouldKick(action, config.isRequired(), config.isEnforceRequired())) {
+            if (DeliveryTracker.kicks(action, config.isRequired(), config.isEnforceRequired())) {
+                logger.info("Not kicking " + player.getName() + " (" + reason + "): downloads are failing for "
+                        + "several players, which points at a hosting problem (see the warning above)");
+            }
+            return;
+        }
         Component message = miniMessage.deserialize(config.getEnforceKickMessage());
         logger.info("Kicking " + player.getName() + ": " + reason + " (distribution.enforce-required)");
         player.getScheduler().run(plugin.getLoader(), scheduled -> {

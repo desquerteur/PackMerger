@@ -52,6 +52,14 @@ Run against a real server before tagging a release. The plugin advertises
    the running version.
 5. Drop a pack into `packs/`, wait for hot-reload (debounce), confirm a re-merge.
 6. Join with a client — the resource pack is sent and applies.
+7. **Per-player URL (zero config)**: with `public-url`/`public-host` empty, the console
+   shows `Pack URL mode: per-player: ...`. Join from **another machine** in the LAN using
+   the server's LAN IP: at `log-level: debug` the log shows `Sent resource pack to … (URL:
+   http://<LAN IP>:<port>/pack, per-player)` and the pack loads. Block the port in the
+   server machine's firewall and join with 3 different accounts: the first two are kicked
+   after the retries, then one `Resource pack downloads failed for 3 different players`
+   warning appears and later players are not kicked; unblock, one successful load logs
+   that enforcement is back. Declining still kicks throughout.
 
 ### Datapack resource packs (Paper 26.2)
 

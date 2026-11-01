@@ -6,11 +6,12 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Per-session delivery bookkeeping, free of any Bukkit types so it can be unit tested.
  *
- * <p>Tracks two things:</p>
+ * <p>Tracks three things:</p>
  * <ul>
  *   <li><b>Awaiting players</b>: players who joined while no pack was published yet.
  *       They are sent the pack as soon as the first one is published, whatever
@@ -19,6 +20,9 @@ import java.util.concurrent.ConcurrentHashMap;
  *       {@code DISCARDED} for PackMerger's pack, it is re-sent after a delay, at most
  *       {@code maxAttempts} times per session. {@code INVALID_URL} and
  *       {@code FAILED_RELOAD} are never retried because a resend cannot fix them.</li>
+ *   <li><b>Hosting health</b>: when several different players' downloads fail for good
+ *       with no successful load in between, failed downloads stop kicking until the next
+ *       successful load ({@link #noteHosting}). This state outlives player sessions.</li>
  * </ul>
  *
  * <p>State is in-memory only and is reset when a player joins or quits. The Minecraft
@@ -76,6 +80,57 @@ public final class DeliveryTracker {
      */
     public static boolean kicks(Action action, boolean required, boolean enforce) {
         return required && enforce && (action == Action.DECLINED || action == Action.GAVE_UP);
+    }
+
+    /**
+     * Distinct players whose download must fail for good, with no successful load since
+     * startup or the last one in between, before failed downloads stop kicking.
+     */
+    public static final int HOSTING_FAILURE_PLAYERS = 3;
+
+    /** What {@link #noteHosting} changed about download-failure kicks. */
+    public enum HostingChange { NONE, PAUSED, RESUMED }
+
+    /** Players who gave up since startup or the last successful load. */
+    private final Set<UUID> failedSinceLoad = ConcurrentHashMap.newKeySet();
+    private final AtomicBoolean downloadKicksPaused = new AtomicBoolean();
+
+    /**
+     * Hosting check: when {@link #HOSTING_FAILURE_PLAYERS} different players gave up and
+     * nobody loaded the pack in between, the URL is most likely unreachable (port closed,
+     * not forwarded), and kicking would lock everyone out. Failed downloads then stop
+     * kicking until the next successful load. Declining still kicks.
+     *
+     * @param action the decision {@link #onStatus} returned for {@code player}
+     * @return whether this outcome paused or resumed download-failure kicks
+     */
+    public HostingChange noteHosting(UUID player, Action action) {
+        if (action == Action.LOADED) {
+            failedSinceLoad.clear();
+            return downloadKicksPaused.compareAndSet(true, false) ? HostingChange.RESUMED : HostingChange.NONE;
+        }
+        if (action == Action.GAVE_UP) {
+            failedSinceLoad.add(player);
+            if (failedSinceLoad.size() >= HOSTING_FAILURE_PLAYERS && downloadKicksPaused.compareAndSet(false, true)) {
+                return HostingChange.PAUSED;
+            }
+        }
+        return HostingChange.NONE;
+    }
+
+    /** @return {@code true} while failed downloads don't kick because hosting looks broken */
+    public boolean downloadKicksPaused() {
+        return downloadKicksPaused.get();
+    }
+
+    /** @return how many different players gave up since startup or the last successful load */
+    public int failedPlayersSinceLoad() {
+        return failedSinceLoad.size();
+    }
+
+    /** {@link #kicks}, except that {@link Action#GAVE_UP} does not kick while hosting looks broken. */
+    public boolean shouldKick(Action action, boolean required, boolean enforce) {
+        return kicks(action, required, enforce) && !(action == Action.GAVE_UP && downloadKicksPaused.get());
     }
 
     /**

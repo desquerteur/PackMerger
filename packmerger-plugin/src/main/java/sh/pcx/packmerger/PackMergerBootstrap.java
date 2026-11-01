@@ -1505,6 +1505,8 @@ public class PackMergerBootstrap implements PackMergerApi {
      *         {@code null} when hosting looks healthy
      */
     public String getHostingProblem() {
+        String deliveryProblem = distributor == null ? null : distributor.getHostingProblem();
+        if (deliveryProblem != null) return deliveryProblem;
         UploadChain.Outcome outcome = lastUploadOutcome;
         if (outcome == null) return null;
         if (outcome.fallback()) {
@@ -1515,7 +1517,7 @@ public class PackMergerBootstrap implements PackMergerApi {
             if (selfHost.getVerification().state() == SelfHostProvider.VerificationState.FAILED) {
                 return "Self-host verification failed: " + selfHost.getVerification().detail();
             }
-            if (selfHost.getResolution() != null && !selfHost.getResolution().routable()) {
+            if (selfHost.getResolution() != null && !selfHost.getResolution().routable() && !selfHost.isPerPlayer()) {
                 return selfHost.getResolution().advice();
             }
         }

@@ -543,8 +543,18 @@ upload:
     # Default: "" (auto: see public-host below)
     public-url: ""
 
-    # When public-url is empty, the URL is built as http://<host>:<port>/pack and
-    # the host is the first publicly routable one of:
+    # ZERO CONFIG (public-url and public-host both empty, no proxy): every player
+    # gets http://<address they joined with>:<port>/pack, i.e. the LAN IP, public
+    # IP or domain they typed in the server list. That address already reaches
+    # this machine, so LAN and internet players both work without settings, as
+    # long as the port is open in the firewall (and forwarded for internet
+    # players). Not used behind Velocity/BungeeCord or with proxy-protocol
+    # (TCPShield etc.), where players type the proxy's address: set public-url
+    # or public-host there. Also set one of them when players join through an
+    # SRV record or a tunnel (playit.gg, ...) that only forwards the Minecraft port.
+    #
+    # Otherwise (or as fallback when a client sends no usable address) the URL is
+    # http://<host>:<port>/pack and the host is the first publicly routable one of:
     #   1. public-host (below)
     #   2. this server's public IP, if detect-public-ip is true
     #   3. server-ip from server.properties
@@ -553,7 +563,8 @@ upload:
     # (100.64-127.x), 0.0.0.0 and IPv6 unique-local addresses are NOT routable:
     # if nothing better is found PackMerger still uses one of them (LAN players
     # can download) but warns on every merge, tells admins on join and shows
-    # the fix in /pm status.
+    # the fix in /pm status. A localhost/127.x URL is never sent to a player who
+    # is not on this machine.
     #
     # Host name or IP only, no scheme or port. Example: "play.example.com"
     # Default: "" (not set)

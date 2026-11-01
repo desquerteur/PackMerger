@@ -6,6 +6,40 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-11-01
+
+Fixes the zero-config self-host setup that locked every player out on a real server:
+with nothing configured the pack URL was `http://localhost:<port>/pack`, every download
+failed and forced download kicked each player.
+
+### Fixed
+- **Pack URL per player.** Root cause: with `public-url`, `public-host` and `server-ip`
+  empty and the (opt-in) public IP lookup off, the only host left was the wildcard bind
+  address, advertised as `localhost`. Now, when neither `upload.self-host.public-url` nor
+  `public-host` is set and no proxy is detected, each player is sent
+  `http://<address they joined with>:<port>/pack` (`Player#getVirtualHost()`: the LAN IP,
+  public IP or domain typed in the server list; IPv6 bracketed; validated strictly). The
+  pack bytes, SHA-1 and pack UUID stay the same for everyone. Explicit `public-url` /
+  `public-host` still win; behind Velocity/BungeeCord (`spigot.yml settings.bungeecord`,
+  `paper-global.yml proxies.velocity.enabled`), with `proxies.proxy-protocol` or
+  `distribution.proxy-notify` the fixed URL is used as before. In per-player mode a
+  non-routable fallback host no longer warns or triggers `upload.fallback`.
+- **No loopback URL for remote players.** A URL pointing at `localhost`, `127.x`, `::1`
+  or `0.0.0.0` is never sent to a player who is not connecting from the server machine;
+  the player gets no pack (and is not kicked) and admins get one warning naming the
+  settings to fix.
+- **A hosting problem no longer locks everyone out.** When downloads fail for good for 3
+  different players with no successful load in between, failed downloads stop kicking,
+  admins get one clear warning (port closed in the firewall / not forwarded, how to fix)
+  and it is shown on admin join; enforcement resumes after the next successful load.
+  Declining the pack still kicks.
+
+### Changed
+- Startup log line `Pack URL mode: per-player: http://<server address the player joined
+  with>:<port>/pack ...` or `Pack URL mode: fixed URL <url> (from ...)`, with the hint
+  that TCP `<port>` must be open in the server machine's firewall (LAN players too) and
+  forwarded for internet players. `/pm status` shows the URL mode.
+
 ## [1.4.0] - 2026-11-01
 
 First release of the fork **desquerteur/PackMerger** (based on pcxgg/PackMerger 1.3.0,

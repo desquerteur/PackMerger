@@ -26,7 +26,7 @@ A Paper plugin that merges multiple Minecraft resource packs into a single pack,
 
 ## Quick start (zero config)
 
-1. **Install the jar.** Put `packmerger-plugin-1.4.0.jar` into `plugins/` and start the
+1. **Install the jar.** Put `packmerger-plugin-1.4.1.jar` into `plugins/` and start the
    server once (Paper 26.1+ / Folia, Java 25).
 2. **Add packs.** Drop resource packs (zips or unzipped folders) into
    `plugins/PackMerger/packs/`, and datapacks into your world's datapacks folder
@@ -34,13 +34,24 @@ A Paper plugin that merges multiple Minecraft resource packs into a single pack,
    resource packs that belong to those datapacks on its own (also ones the datapack
    declares on Modrinth) and merges everything into one pack — no restart needed.
 3. **Open the port.** The built-in web server hosts the pack on the **Minecraft port + 1,
-   TCP** (e.g. `25566` when the server runs on `25565`). Open/forward that port in your
-   firewall or hosting panel. (On a host where you cannot open a port, see
-   [Upload Provider](#upload-provider).)
-4. **Done.** Every player gets the merged pack when they join. It is **required**: a
-   player who declines is kicked, and so is a player whose download still fails after 3
-   automatic retries (a broken URL or a pack the client cannot load never kicks — that
-   would lock everyone out). Turn this off with `distribution.enforce-required.enabled: false`.
+   TCP** (e.g. `25566` when the server runs on `25565`). Allow that port in the **firewall
+   of the server machine** (LAN players need this too, e.g. Windows Defender Firewall) and
+   forward it on your router or hosting panel for players on the internet. (On a host
+   where you cannot open a port, see [Upload Provider](#upload-provider).) The startup log
+   line `Pack URL mode: ...` names the port.
+4. **Done.** Every player gets the merged pack when they join, from the same address they
+   typed to join (LAN IP, public IP or domain) plus that port, so no host or URL has to be
+   configured. The pack is **required**: a player who declines is kicked, and so is a
+   player whose download still fails after 3 automatic retries (a broken URL or a pack the
+   client cannot load never kicks, and if downloads fail for 3 different players before
+   anyone has loaded the pack, PackMerger assumes a closed port, stops kicking for failed
+   downloads and logs how to fix it, until a download works again). Turn enforcement off
+   with `distribution.enforce-required.enabled: false`.
+
+Behind Velocity/BungeeCord, with proxy-protocol (TCPShield, ...), or when players join
+through an SRV record or a tunnel (playit.gg, ...) that does not forward the extra port,
+the address players type does not lead to the pack port: set
+`upload.self-host.public-url` (or `public-host`) to an address that does.
 
 Players only ever download the **resource pack**. Datapacks stay on the server; only
 their `assets/` (textures, models, sounds, lang, …) are copied into the merged pack, never
@@ -246,7 +257,7 @@ upload:
 
 The self-host provider starts a built-in HTTP server on all interfaces and serves the pack at `/pack`. Make sure the port is open in your firewall (on Pterodactyl/Pelican-style panels, add a port allocation for it).
 
-**The URL players are sent.** `public-url`, if set, is used exactly as written, so a reverse proxy or CDN URL such as `https://cdn.example.com/rp.zip` works (the proxy forwards to `http://<server>:<port>/pack`; requests arriving with the public URL's own path are served as well). Otherwise the URL is `http://<host>:<port>/pack`, with the host taken from the first routable of `public-host`, the opt-in public IP lookup, `server-ip` in `server.properties`, and the bind address. Loopback, private (RFC 1918), link-local, CGNAT, `0.0.0.0` and IPv6 unique-local hosts can't be reached from the internet: PackMerger still uses the best one it found (LAN players can download) but warns on every merge, tells admins on join, and `/pm status` says exactly what to set.
+**The URL players are sent.** With neither `public-url` nor `public-host` set and no proxy in front (no `settings.bungeecord` in `spigot.yml`, no `proxies.velocity.enabled` or `proxies.proxy-protocol` in `config/paper-global.yml`, no `distribution.proxy-notify`), each player gets `http://<address they joined with>:<port>/pack`: the host they typed in the server list (`Player#getVirtualHost()`: LAN IP, public IP or domain; IPv6 in brackets). The pack, its SHA-1 and its pack UUID are the same for everyone, so the client cache works as before. A client that sends no usable address gets the fixed URL below, and a URL pointing at `localhost`/`127.x`/`::1` is never sent to a player who is not on the server machine (they get no pack and are not kicked; admins are told what to set). `public-url`, if set, is used exactly as written, so a reverse proxy or CDN URL such as `https://cdn.example.com/rp.zip` works (the proxy forwards to `http://<server>:<port>/pack`; requests arriving with the public URL's own path are served as well). Otherwise the URL is `http://<host>:<port>/pack`, with the host taken from the first routable of `public-host`, the opt-in public IP lookup, `server-ip` in `server.properties`, and the bind address. Loopback, private (RFC 1918), link-local, CGNAT, `0.0.0.0` and IPv6 unique-local hosts can't be reached from the internet: PackMerger still uses the best one it found (LAN players can download) but warns on every merge, tells admins on join, and `/pm status` says exactly what to set.
 
 **Verification.** After every upload, PackMerger downloads the first KiB of the pack from `127.0.0.1:<port>` and from the advertised URL and compares the bytes (the second request also catches routers without NAT hairpinning, closed ports and proxies pointing elsewhere). It runs off the main thread; the new pack is only served at `/pack` once it is published, so the check never exposes bytes that don't match the advertised SHA-1. A failure is logged, sent to online admins, shown in `/pm status`, and switches to `upload.fallback` when one is configured. For a `public-url` you set yourself, a failing advertised-URL check only warns (some NATs and CDNs can't be reached from inside). Set `verify: false` to skip it.
 
@@ -659,7 +670,10 @@ when they join.
 
 The merged pack is required and enforced by default (`distribution.required: true`,
 `distribution.enforce-required.enabled: true`): players who decline (or whose download
-keeps failing after the retries) are kicked with `enforce-required.kick-message`.
+keeps failing after the retries) are kicked with `enforce-required.kick-message`. When
+downloads fail for good for 3 different players with no successful load in between,
+failed downloads stop kicking (one warning for admins) until the next successful load;
+declining always kicks.
 
 ### Profiles / Presets
 
@@ -891,6 +905,7 @@ When enabled, a background thread watches the `packs/` folder for file system ev
 ### Players can't download the self-hosted pack
 
 - Run `/pm status`: it shows the hosting route, the resolved host and where it came from, and the last verification result with its reason
+- `URL mode: per player`: players download from the address they joined with on the self-host port. If downloads fail, that TCP port is blocked by the server machine's firewall or not forwarded on the router (or players join through a proxy/tunnel/SRV record: set `public-url`)
 - `Not reachable from the internet`: set `upload.self-host.public-url` (full URL) or `public-host` (your domain or public IP), or enable `detect-public-ip`
 - `Verification: FAILED (advertised URL check failed ...)`: the port isn't forwarded/open, your router doesn't support NAT hairpinning, or a reverse proxy points elsewhere. Fix the network, or configure `upload.fallback: ["s3"]` with an S3/R2 bucket
 
