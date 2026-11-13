@@ -6,14 +6,17 @@ test('plugin enables cleanly and ships the first merge', async ({ server }) => {
   const all = { since: 0, timeout: 15_000 };
   await expect(server).toHaveReceivedMessage('PackMerger enabled!', all);
   await expect(server).toHaveReceivedMessage(`Self-host HTTP server started on port ${SELF_HOST_PORT}`, all);
-  await expect(server).toHaveReceivedMessage('Discovered 2 pack(s): [overlay-pack, base-pack]', all);
+  // Listed in directory order, which depends on the OS/file system; the merge order below does not.
+  await expect(server).toHaveReceivedMessage(/Discovered 2 pack\(s\): \[(overlay-pack, base-pack|base-pack, overlay-pack)\]/, all);
   await expect(server).toHaveReceivedMessage('Merge order (highest priority first): [overlay-pack, base-pack]', all);
   await expect(server).toHaveReceivedMessage(/Merged pack SHA1: [0-9a-f]{40}/, all);
   await expect(server).toHaveReceivedMessage(`Pack uploaded successfully: ${PACK_URL}`, all);
 
   const quiet = { since: 0 };
   await expect(server).not.toHaveReceivedMessage(/\[PackMerger\].*\[ERROR\]/, quiet);
-  await expect(server).not.toHaveReceivedMessage(/Exception/, quiet);
+  // Paper's system-info library (OSHI) logs a Win32Exception on Windows machines whose
+  // performance counters are broken; that is the host, not PackMerger.
+  await expect(server).not.toHaveReceivedMessage(/(?<!win32\.Win32)Exception/, quiet);
   // Profiles are defined but active-profile is "" (documented as "no profile in use"),
   // which must not be reported as a misconfiguration.
   await expect(server).not.toHaveReceivedMessage('is not defined under profiles', quiet);
@@ -28,7 +31,8 @@ test('/pm status reports provider, pack URL, hash and pack count', async ({ play
   await expect(player).toHaveReceivedMessage(/Last Merge: \d{4}-\d{2}-\d{2}/);
   await expect(player).toHaveReceivedMessage(`Pack URL: ${PACK_URL}`);
   await expect(player).toHaveReceivedMessage(/SHA1: [0-9a-f]{40}/);
-  await expect(player).toHaveReceivedMessage(/Pack Size: \d+(\.\d)? (B|KB)/);
+  // The server's locale picks the decimal separator ("1.6 KB", "1,6 KB").
+  await expect(player).toHaveReceivedMessage(/Pack Size: \d+([.,]\d)? (B|KB)/);
   await expect(player).toHaveReceivedMessage('Merging: No');
   await expect(player).toHaveReceivedMessage('Packs in folder: 2');
 });

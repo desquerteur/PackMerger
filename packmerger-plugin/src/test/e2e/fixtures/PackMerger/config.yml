@@ -30,6 +30,19 @@ plugin-packs:
       cluster: true
     e2e-broken:
       path: "PmE2EFake/not_a_pack"
+# Datapack discovery is on (the default); the world has no datapacks until
+# embedded-datapacks.spec.ts copies them in. No Modrinth lookups (network), and a short
+# stability window so a test does not wait seconds for every staged change.
+datapacks:
+  enabled: true
+  only-enabled: true
+  watch: true
+  stability:
+    polls: 2
+    interval-millis: 300
+  external:
+    modrinth:
+      enabled: false # e2e:modrinth
 # Profiles are defined but none is active, so the root-level priority applies.
 active-profile: ""
 profiles:
@@ -59,7 +72,12 @@ upload:
   self-host:
     # Fixed port well away from the Minecraft/RCON ports of the concurrent E2E servers.
     port: 28567
+    # Loopback only, like the Minecraft server (server-ip=localhost, see build.gradle):
+    # nothing listens on the network and no firewall prompt appears.
+    bind: "localhost"
     public-url: ""
+    # upload-hosting.spec.ts sets this to exercise the fixed-URL mode.
+    public-host: ""
     rate-limit: 50
 distribution:
   enabled: true

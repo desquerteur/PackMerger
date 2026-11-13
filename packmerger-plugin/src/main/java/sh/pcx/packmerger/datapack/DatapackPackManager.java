@@ -100,11 +100,8 @@ public class DatapackPackManager {
     /** Guards {@link #lastScan} changes: the local scan phase and its network update. Never held during I/O on the network. */
     private final Object scanLock = new Object();
 
-    /** Guards {@link #scanning}, {@link #rescanRequested} and {@link #runningScan} together. */
-    private final Object scanStateLock = new Object();
-    private boolean scanning;
-    private boolean rescanRequested;
-    private CompletableFuture<ScanReport> runningScan;
+    /** One scan at a time; requests made meanwhile are served by the next scan. */
+    private final ScanQueue scanQueue = new ScanQueue();
 
     /** Set by {@link #shutdown()}: no scan or watcher starts afterwards. */
     private volatile boolean closed;
@@ -184,7 +181,7 @@ public class DatapackPackManager {
 
     /**
      * Full scan, async; one scan at a time (a scan requested meanwhile runs once the
-     * current one ends and gets the running scan's future).
+     * current one ends, and the request gets that scan's report; see {@link ScanQueue}).
      * <ol>
      *   <li>local phase: snapshot, inspection, cached Modrinth results and files already
      *       downloaded; quick, and the only part the startup merge waits for;</li>
@@ -205,14 +202,8 @@ public class DatapackPackManager {
         }
         CompletableFuture<ScanReport> done = new CompletableFuture<>();
         CompletableFuture<ScanReport> local = new CompletableFuture<>();
-        synchronized (scanStateLock) {
-            if (scanning) {
-                rescanRequested = true;
-                return runningScan;
-            }
-            scanning = true;
-            runningScan = done;
-        }
+        CompletableFuture<ScanReport> queued = scanQueue.tryStart(trigger, forceLookup, done);
+        if (queued != null) return queued;
         CompletableFuture<DatapackLocator.Snapshot> refresh = locator.refreshAsync();
         refresh.copy()
                 .completeOnTimeout(null, SNAPSHOT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
@@ -237,13 +228,13 @@ public class DatapackPackManager {
                         local.completeExceptionally(t);
                         done.completeExceptionally(t);
                     }
-                    boolean again;
-                    synchronized (scanStateLock) {
-                        scanning = false;
-                        again = rescanRequested;
-                        rescanRequested = false;
+                    ScanQueue.Queued next = scanQueue.finish();
+                    if (next != null) {
+                        scan(next.trigger(), next.forceLookup()).whenComplete((report, error) -> {
+                            if (error != null) next.result().completeExceptionally(error);
+                            else next.result().complete(report);
+                        });
                     }
-                    if (again) scan(ScanTrigger.WATCHER, false);
                 });
         return trigger == ScanTrigger.STARTUP ? local : done;
     }
@@ -370,6 +361,19 @@ public class DatapackPackManager {
         return inspector;
     }
 
+    /** State of a datapack zip that cannot be read yet because it is still being uploaded. */
+    static final String WRITING = "waiting for the upload to finish";
+
+    /**
+     * An unreadable datapack modified less than {@link DatapackStager#YOUNG_MILLIS} ago is
+     * an upload in progress, as the stager also assumes: reported as {@link #WRITING}, not
+     * as an error. The watcher's change events re-scan it once it is complete.
+     */
+    private static boolean stillBeingWritten(DatapackInfo i) {
+        return i.kind() == DatapackKind.UNREADABLE
+                && DatapackLocator.isStillBeingWritten(i.path(), DatapackStager.YOUNG_MILLIS, System.currentTimeMillis());
+    }
+
     /** The enabled-id check, tolerant of a different id prefix than {@code file/}. */
     static boolean isEnabled(Set<String> ids, Path candidate) {
         String name = candidate.getFileName().toString();
@@ -413,8 +417,12 @@ public class DatapackPackManager {
             DatapackInfo i = c.info();
             switch (i.kind()) {
                 case UNREADABLE, LIMIT_EXCEEDED -> {
-                    errors++;
-                    lines.add("error|" + c.alias() + "|" + i.detail());
+                    if (stillBeingWritten(i)) {
+                        lines.add("problem|" + c.alias() + "|" + WRITING);
+                    } else {
+                        errors++;
+                        lines.add("error|" + c.alias() + "|" + i.detail());
+                    }
                 }
                 case NOT_A_PACK -> lines.add("error|" + c.alias() + "|not a datapack: " + i.detail());
                 default -> {
@@ -440,8 +448,14 @@ public class DatapackPackManager {
             DatapackInfo i = c.info();
             String where = display(i.path());
             switch (i.kind()) {
-                case UNREADABLE, LIMIT_EXCEEDED -> logger.warning("[DATAPACK] [validation-error] " + c.alias()
-                        + " (" + where + "): " + i.detail());
+                case UNREADABLE, LIMIT_EXCEEDED -> {
+                    if (stillBeingWritten(i)) {
+                        logger.debug("[DATAPACK] " + c.alias() + " (" + where + ") is still being written ("
+                                + i.detail() + "); reading it once it settles");
+                    } else {
+                        logger.warning("[DATAPACK] [validation-error] " + c.alias() + " (" + where + "): " + i.detail());
+                    }
+                }
                 case NOT_A_PACK -> logger.debug("[DATAPACK] " + where + " is not a datapack: " + i.detail());
                 default -> {
                     if (i.hasAssets()) {
@@ -569,7 +583,9 @@ public class DatapackPackManager {
             DatapackInfo i = c.info();
             DatapackStager.Outcome o = stage == null ? null : stage.outcome(c.alias());
             String state;
-            if (o != null) {
+            if (stillBeingWritten(i)) {
+                state = WRITING;
+            } else if (o != null) {
                 state = switch (o.status()) {
                     case STAGED, UNCHANGED -> "merged";
                     case DEFERRED -> o.merged() ? "merged (update pending)" : "waiting for the upload to finish";
@@ -854,10 +870,7 @@ public class DatapackPackManager {
 
     /** Restarts the watchers once the running scan (if any) has a new folder list. */
     public void restartWatchersLater() {
-        CompletableFuture<ScanReport> running;
-        synchronized (scanStateLock) {
-            running = runningScan;
-        }
+        CompletableFuture<ScanReport> running = scanQueue.current();
         if (running == null || running.isDone()) {
             startWatchers();
         } else {
@@ -904,8 +917,6 @@ public class DatapackPackManager {
 
     /** @return {@code true} while a scan runs */
     public boolean isScanning() {
-        synchronized (scanStateLock) {
-            return scanning;
-        }
+        return scanQueue.isRunning();
     }
 }

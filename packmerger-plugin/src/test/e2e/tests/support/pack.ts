@@ -141,14 +141,14 @@ export async function consoleCommand(server: { execute(cmd: string): Promise<str
   return (await server.execute(cmd)).replace(/§[0-9a-fk-orx]/gi, '');
 }
 
-/** Builds a minimal stored (uncompressed) ZIP archive, enough for PackMerger to read. */
-export function buildZip(files: Record<string, string>): Buffer {
+/** Builds a minimal stored (uncompressed) ZIP archive, enough for PackMerger to read. Entries are text or bytes. */
+export function buildZip(files: Record<string, string | Buffer>): Buffer {
   const locals: Buffer[] = [];
   const centrals: Buffer[] = [];
   let offset = 0;
   for (const [name, content] of Object.entries(files)) {
     const nameBuf = Buffer.from(name, 'utf8');
-    const data = Buffer.from(content, 'utf8');
+    const data = typeof content === 'string' ? Buffer.from(content, 'utf8') : content;
     const crc = crc32(data);
     const local = Buffer.alloc(30);
     local.writeUInt32LE(0x04034b50, 0);

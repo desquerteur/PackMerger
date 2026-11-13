@@ -212,6 +212,9 @@ public class ConfigManager {
     /** Host name or IP for the auto-built self-host URL; empty = continue down the chain. */
     private String selfHostPublicHost;
 
+    /** Address the self-host HTTP server listens on; empty = all interfaces. */
+    private String selfHostBind;
+
     /** Whether to look up this server's public IP through a third-party service (opt-in). */
     private boolean selfHostDetectPublicIp;
 
@@ -464,6 +467,7 @@ public class ConfigManager {
         selfHostPublicUrl = config.getString("upload.self-host.public-url", "").trim();
         selfHostRateLimit = config.getInt("upload.self-host.rate-limit", 50);
         selfHostPublicHost = config.getString("upload.self-host.public-host", "").trim();
+        selfHostBind = config.getString("upload.self-host.bind", "").trim();
         selfHostDetectPublicIp = config.getBoolean("upload.self-host.detect-public-ip", false);
         selfHostPublicIpServices = config.isList("upload.self-host.public-ip-services")
                 ? config.getStringList("upload.self-host.public-ip-services")
@@ -943,6 +947,9 @@ public class ConfigManager {
 
     /** @return {@code upload.self-host.public-host}, or empty to continue down the host chain */
     public String getSelfHostPublicHost() { return selfHostPublicHost; }
+
+    /** @return {@code upload.self-host.bind}: the address the HTTP server listens on, or empty for all interfaces */
+    public String getSelfHostBind() { return selfHostBind; }
 
     /** @return whether the opt-in public IP lookup is enabled */
     public boolean isSelfHostDetectPublicIp() { return selfHostDetectPublicIp; }

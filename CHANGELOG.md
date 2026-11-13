@@ -6,6 +6,49 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.4.2] - 2026-11-02
+
+Fixes found by running the plugin end-to-end on a real Paper 26.2 server (bots via the
+plugwright suite, a manual smoke test, and real Modrinth datapacks).
+
+### Fixed
+- **A removed datapack's resource pack was sent forever.** When a merge found no resource
+  pack at all any more (e.g. the last datapack with assets was removed or disabled), the
+  previous pack stayed live: joining players still had to download it (and were kicked
+  for declining it with the zero-config defaults), and it was re-published on every
+  start. Now the pack is withdrawn: the output is deleted, nobody is sent it, online
+  players drop it, and a decline report for it no longer kicks. Players online meanwhile
+  get the next pack as soon as one is merged.
+- **False `[validation-error] … corrupt zip` while a datapack zip is being uploaded.** A
+  scan that ran while the file was still being written (FTP, panel file manager) warned
+  about a broken datapack. A zip that cannot be read yet and was modified in the last
+  60 s is now reported as "waiting for the upload to finish" (debug log only), the same
+  rule the staging step already used; the finished file is read on the next change.
+- **`/pm scan` could report an older scan.** A scan requested while another one ran (e.g.
+  right after a world loaded) got that earlier scan's result, which could miss the
+  datapack just added; `/pm scan refresh` lost its forced lookup the same way, and
+  `/pm rebuild` could merge before the rescan. Such a request is now answered by the next
+  scan, which starts after it.
+- **Windows: pack folders could not be renamed or moved while the server ran.** The file
+  watcher kept a handle open on every folder below `packs/` and below the datapack
+  folders ("Permission denied"). On Windows it now watches the folder tree with one
+  registration; other systems are unchanged.
+- **Build: a version bump kept the old version in `plugin.yml`** when the build was not
+  clean (`processResources` stayed up to date). The version is now a task input.
+
+### Added
+- `upload.self-host.bind` (default `""` = all interfaces, as before): the address the
+  built-in HTTP server listens on, e.g. `127.0.0.1` behind a reverse proxy on the same
+  machine. The local reachability check uses it; a change applies on `/pm reload`.
+
+### Tests
+- New e2e spec `embedded-datapacks.spec.ts` (hybrid, resource-pack subfolder, nested zip and
+  data-only datapacks, runtime add/change/remove, a half-written zip, a datapack in
+  another world's folder, `/pm scan|sources|conflicts|rebuild|status`, per-player URL
+  with a LAN address, SHA-1 of the served pack, kick on decline with the zero-config
+  defaults, pack withdrawal). The e2e server listens on localhost only, and its Minecraft
+  version can be chosen with `-Pe2eMcVersion=26.2`.
+
 ## [1.4.1] - 2026-11-01
 
 Fixes the zero-config self-host setup that locked every player out on a real server:

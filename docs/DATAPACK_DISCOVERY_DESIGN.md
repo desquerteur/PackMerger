@@ -983,7 +983,7 @@ green; `./gradlew build` runs them all.
 | `merge/MergeInputsTest` | same inputs → same fingerprint; any pack fingerprint, order, model-policy, compression change → different |
 | `merge/FileWatcherRelevanceTest` (existing) | must still pass; add a case for the datapack predicate ignoring `.part`/`.crdownload` |
 
-Optional e2e (plugwright, Paper 26.3): `src/test/e2e/tests/datapacks.spec.ts` + fixture
+Optional e2e (plugwright, Paper 26.3): `src/test/e2e/tests/embedded-datapacks.spec.ts` + fixture
 `world/datapacks/pm-hybrid.zip` built by the test support code: assert the merged pack
 contains `assets/pmtest/dp_marker.txt` and no `data/`. Only if the plugwright harness
 allows writing into the world folder before start; otherwise documented as a manual

@@ -532,6 +532,14 @@ upload:
     # Default: -1 (was 8080 before config-version 4; an explicit port is kept)
     port: -1
 
+    # The address the HTTP server listens on. Empty = all interfaces (needed
+    # for the zero-config per-player URLs below). Set an IP of this machine to
+    # listen only there, e.g. "127.0.0.1" when a reverse proxy on this machine
+    # serves public-url. A change takes effect on /pm reload.
+    #
+    # Default: "" (all interfaces)
+    bind: ""
+
     # The complete public URL players download the pack from. Used as-is:
     #   "https://cdn.example.com/rp.zip"    -> exactly that URL
     #   "https://example.com/packs/pack"    -> exactly that URL

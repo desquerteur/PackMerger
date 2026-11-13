@@ -1,5 +1,8 @@
 package test.pmapi;
 
+import org.bukkit.World;
+import org.bukkit.WorldCreator;
+import org.bukkit.WorldType;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
 import org.bukkit.event.EventHandler;
@@ -58,6 +61,18 @@ public class ApiTestPlugin extends JavaPlugin implements Listener {
                     lazy = args.length > 1 && args[1].equals("on");
                     sender.sendMessage("pmapitest: lazy=" + lazy);
                 }
+                case "world" -> {
+                    // A plugin-created world: embedded-datapacks.spec checks that its datapacks/ folder is
+                    // listed but not merged (the server only loads <level-name>/datapacks).
+                    World w = getServer().getWorld(args[1]);
+                    if (w == null) {
+                        w = new WorldCreator(args[1]).type(WorldType.FLAT).generateStructures(false).createWorld();
+                    }
+                    sender.sendMessage("pmapitest: world " + args[1] + " folder="
+                            + w.getWorldFolder().getAbsoluteFile().toPath().normalize());
+                }
+                case "unloadworld" -> sender.sendMessage("pmapitest: unloaded="
+                        + getServer().unloadWorld(args[1], false));
                 case "disable" -> {
                     sender.sendMessage("pmapitest: disabling");
                     getServer().getPluginManager().disablePlugin(this);

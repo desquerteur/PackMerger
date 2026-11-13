@@ -128,6 +128,20 @@ class DatapackLocatorTest {
     }
 
     @Test
+    void stillBeingWritten_onlyWithinTheSettleWindow() throws IOException {
+        Path zip = root.resolve("upload.zip");
+        Files.writeString(zip, "PK half");
+        long modified = 1_000_000_000_000L;
+        Files.setLastModifiedTime(zip, java.nio.file.attribute.FileTime.fromMillis(modified));
+        assertTrue(DatapackLocator.isStillBeingWritten(zip, 3_000, modified));
+        assertTrue(DatapackLocator.isStillBeingWritten(zip, 3_000, modified + 2_900));
+        assertFalse(DatapackLocator.isStillBeingWritten(zip, 3_000, modified + 3_000));
+        // A timestamp in the future or a missing file never hides a broken datapack.
+        assertFalse(DatapackLocator.isStillBeingWritten(zip, 3_000, modified - 10));
+        assertFalse(DatapackLocator.isStillBeingWritten(root.resolve("gone.zip"), 3_000, modified));
+    }
+
+    @Test
     void packId_and_enabledMatching() {
         Path p = Path.of("world", "datapacks", "terralith.zip");
         assertEquals("file/terralith.zip", DatapackLocator.packId(p));

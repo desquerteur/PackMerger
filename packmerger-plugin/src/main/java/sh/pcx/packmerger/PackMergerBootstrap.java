@@ -657,6 +657,9 @@ public class PackMergerBootstrap implements PackMergerApi {
 
                 File mergedTemp = mergeEngine.merge(tempOutputFile);
                 if (mergedTemp == null) {
+                    // Nothing left to merge (e.g. the last datapack with a resource pack was
+                    // removed): the previous pack describes sources that are gone.
+                    unpublish();
                     if (sender != null) {
                         sender.sendMessage(messageManager.getMessage("merge.failed-no-packs"));
                     }
@@ -860,6 +863,32 @@ public class PackMergerBootstrap implements PackMergerApi {
             return record;
         } finally {
             publishLock.unlock();
+        }
+    }
+
+    /**
+     * Withdraws the live pack after a merge found no resource packs at all: the output
+     * (and its sidecars) is deleted, so it is not re-published on the next start either,
+     * joining players are not sent anything, and online players drop it
+     * ({@link PackDistributor#onUnpublished}). The next merge that produces a pack
+     * publishes it as usual.
+     */
+    private void unpublish() {
+        PublishedPack previous;
+        publishLock.lock();
+        try {
+            previous = publishedPack.getAndSet(null);
+            File output = getOutputFile();
+            safeDelete(MergeInputs.sidecar(output));
+            safeDelete(PackMergeEngine.provenanceSidecar(output));
+            safeDelete(output);
+        } finally {
+            publishLock.unlock();
+        }
+        if (previous != null) {
+            logger.warning("No resource packs left to merge; players are no longer sent the previous pack (SHA1: "
+                    + previous.sha1Hex() + ")");
+            if (distributor != null) distributor.onUnpublished(previous);
         }
     }
 

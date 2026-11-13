@@ -272,6 +272,21 @@ public final class DatapackLocator {
         return out;
     }
 
+    /**
+     * Whether {@code path} was modified within the last {@code windowMillis}: an unreadable
+     * zip that fresh is an upload in progress (FTP, panel file manager), not a broken
+     * datapack. A timestamp in the future or an unreadable one counts as settled, so a
+     * broken file is never hidden for good.
+     */
+    public static boolean isStillBeingWritten(Path path, long windowMillis, long nowMillis) {
+        try {
+            long age = nowMillis - Files.getLastModifiedTime(path).toMillis();
+            return age >= 0 && age < windowMillis;
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
     /** @return the server's id for a datapack file or folder: {@code file/<name>} */
     public static String packId(Path candidate) {
         return "file/" + candidate.getFileName();

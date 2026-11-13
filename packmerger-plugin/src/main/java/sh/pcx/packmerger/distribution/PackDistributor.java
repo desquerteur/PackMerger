@@ -254,6 +254,24 @@ public class PackDistributor {
     }
 
     /**
+     * Called after the live pack was withdrawn because nothing was left to merge: online
+     * players drop it and are sent the next pack as soon as one is published, like players
+     * who joined before any pack existed.
+     *
+     * @param previous the pack that was live until now
+     */
+    public void onUnpublished(PublishedPack previous) {
+        for (Player player : Bukkit.getOnlinePlayers()) {
+            UUID id = player.getUniqueId();
+            sentUrls.remove(id);
+            tracker.markAwaiting(id);
+            player.getScheduler().run(plugin.getLoader(), scheduled -> {
+                if (player.isOnline()) player.removeResourcePacks(previous.packId());
+            }, null);
+        }
+    }
+
+    /**
      * Handles online players when the pack content changed, per {@code on-new-pack.action}.
      *
      * @param alreadySent players that were just sent the pack and must not get it twice
@@ -405,6 +423,8 @@ public class PackDistributor {
      */
     private void enforceRequired(Player player, DeliveryTracker.Action action, String reason) {
         ConfigManager config = plugin.getConfigManager();
+        // A report about a pack that was withdrawn meanwhile: there is nothing to require.
+        if (plugin.getPublishedPack() == null) return;
         if (!tracker.shouldKick(action, config.isRequired(), config.isEnforceRequired())) {
             if (DeliveryTracker.kicks(action, config.isRequired(), config.isEnforceRequired())) {
                 logger.info("Not kicking " + player.getName() + " (" + reason + "): downloads are failing for "

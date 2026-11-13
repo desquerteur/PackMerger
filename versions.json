@@ -1,5 +1,5 @@
 {
-  "latest": "1.4.1",
-  "latest_url": "https://github.com/desquerteur/PackMerger/releases/tag/v1.4.1",
-  "latest_notes": "Fork of pcxgg/PackMerger. 1.4.1: zero-config self-host sends each player a pack URL built from the address they joined with (no more localhost URL), never sends loopback URLs to remote players, and stops kicking for failed downloads when hosting is broken. Since 1.4.0 the update check reads GitHub releases; this file is only used by a custom update-check.url."
+  "latest": "1.4.2",
+  "latest_url": "https://github.com/desquerteur/PackMerger/releases/tag/v1.4.2",
+  "latest_notes": "Fork of pcxgg/PackMerger. 1.4.2: a removed datapack's resource pack is no longer sent forever, no false 'corrupt zip' warning while a datapack is uploaded, /pm scan always reports a fresh scan, pack folders can be renamed on Windows while the server runs, new upload.self-host.bind. Since 1.4.0 the update check reads GitHub releases; this file is only used by a custom update-check.url."
 }

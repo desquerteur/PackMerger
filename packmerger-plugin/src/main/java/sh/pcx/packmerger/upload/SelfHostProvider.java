@@ -7,6 +7,8 @@ import sh.pcx.packmerger.config.ConfigManager;
 
 import java.io.File;
 import java.io.IOException;
+import java.net.Inet6Address;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.FileAlreadyExistsException;
@@ -38,7 +40,8 @@ import java.util.concurrent.atomic.AtomicReference;
  * from the address they joined with instead ({@link PlayerPackUrl}, {@link #perPlayerPort});
  * the resolved URL is then only a fallback. Otherwise a non-routable result is logged as a
  * warning on every upload. After each upload {@link #check(String)} verifies the URL by
- * downloading the first KiB through {@code 127.0.0.1} and through the advertised URL (the
+ * downloading the first KiB through {@code 127.0.0.1} (or {@code upload.self-host.bind})
+ * and through the advertised URL (the
  * second catches routers without NAT hairpinning, a closed firewall, or a reverse proxy
  * pointing elsewhere); the result is kept for {@code /pm status} and drives
  * {@code upload.fallback}. Verification runs on the publishing thread, never the main
@@ -76,6 +79,12 @@ public class SelfHostProvider implements UploadProvider, UploadChain.Step {
 
     /** Port the HTTP server was bound to (or attempted), used to decide whether a reload can reuse it. */
     private volatile int boundPort = -1;
+
+    /** {@code upload.self-host.bind} the HTTP server was started with (empty = all interfaces). */
+    private volatile String boundBind = "";
+
+    /** Host the local verification connects to: 127.0.0.1, or the bind address when one is set. */
+    private volatile String localProbeHost = "127.0.0.1";
 
     /** Pack served now; {@code null} until the first upload. */
     private final AtomicReference<PackHttpHandler.ServedPack> current = new AtomicReference<>();
@@ -132,27 +141,32 @@ public class SelfHostProvider implements UploadProvider, UploadChain.Step {
     }
 
     /**
-     * Starts the built-in HTTP server on the configured port, on all interfaces. A bind
-     * failure is logged; {@link #upload} then fails (so no dead URL is advertised) and
-     * {@code upload.fallback} can take over.
+     * Starts the built-in HTTP server on the configured port, on all interfaces unless
+     * {@code upload.self-host.bind} names one address. A bind failure is logged;
+     * {@link #upload} then fails (so no dead URL is advertised) and {@code upload.fallback}
+     * can take over.
      */
     public void start() {
         ConfigManager config = plugin.getConfigManager();
         SelfHostPort portInfo = config.getSelfHostPortInfo();
         int port = portInfo.port();
         boundPort = port;
+        boundBind = config.getSelfHostBind();
         for (String warning : portInfo.warnings()) logger.warning(warning);
         applySettings(config);
 
         try {
-            HttpServer http = HttpServer.create(new InetSocketAddress(port), 0);
+            InetSocketAddress address = bindAddress(boundBind, port);
+            HttpServer http = HttpServer.create(address, 0);
             http.createContext("/", new PackHttpHandler(this::packFor, () -> rateLimiter, () -> paths));
             executor = Executors.newFixedThreadPool(Math.max(4, Runtime.getRuntime().availableProcessors()));
             http.setExecutor(executor);
             http.start();
             server = http;
+            localProbeHost = localProbeHost(address.getAddress());
             logger.upload("Self-host HTTP server started on port " + port
-                    + (portInfo.derived() ? " (Minecraft port + 1)" : ""));
+                    + (portInfo.derived() ? " (Minecraft port + 1)" : "")
+                    + (boundBind.isEmpty() ? "" : ", listening on " + address.getAddress().getHostAddress() + " only"));
         } catch (IOException e) {
             logger.error("Failed to start self-host HTTP server on port " + port + ": " + e.getMessage()
                     + ". Set upload.self-host.port to a free port (-1 = Minecraft port + 1; on a hosting"
@@ -160,6 +174,32 @@ public class SelfHostProvider implements UploadProvider, UploadChain.Step {
             verification = new Verification(VerificationState.FAILED,
                     "HTTP server could not bind port " + port + ": " + e.getMessage(), Instant.now());
         }
+    }
+
+    /**
+     * The socket address for {@code upload.self-host.bind}: all interfaces when blank,
+     * otherwise that IP or host name (resolved now).
+     *
+     * @throws IOException if the host name does not resolve
+     */
+    static InetSocketAddress bindAddress(String bind, int port) throws IOException {
+        if (bind == null || bind.isBlank()) return new InetSocketAddress(port);
+        String host = bind.trim();
+        if (host.startsWith("[") && host.endsWith("]")) host = host.substring(1, host.length() - 1);
+        InetSocketAddress address = new InetSocketAddress(host, port);
+        if (address.isUnresolved()) {
+            throw new IOException("upload.self-host.bind '" + bind.trim() + "' is not an address of this machine");
+        }
+        return address;
+    }
+
+    /** Host the local verification connects to: 127.0.0.1 on the wildcard address, else the bound IP. */
+    static String localProbeHost(InetAddress bound) {
+        if (bound == null || bound.isAnyLocalAddress()) return "127.0.0.1";
+        String ip = bound.getHostAddress();
+        int zone = ip.indexOf('%');
+        if (zone >= 0) ip = ip.substring(0, zone);
+        return bound instanceof Inet6Address ? "[" + ip + "]" : ip;
     }
 
     /** The pack a request gets: the pending one when it carries its token, else the current one. */
@@ -202,7 +242,8 @@ public class SelfHostProvider implements UploadProvider, UploadChain.Step {
      */
     public boolean reconfigure() {
         ConfigManager config = plugin.getConfigManager();
-        if (server == null || config.getSelfHostPort() != boundPort) return false;
+        if (server == null || config.getSelfHostPort() != boundPort
+                || !config.getSelfHostBind().equals(boundBind)) return false;
         for (String warning : config.getSelfHostPortInfo().warnings()) logger.warning(warning);
         applySettings(config);
         // Host settings may have changed: resolve (and re-detect) on the next upload.
@@ -331,8 +372,10 @@ public class SelfHostProvider implements UploadProvider, UploadChain.Step {
         }
         candidates.add(new SelfHostAddress.Candidate(SelfHostAddress.Source.SERVER_IP,
                 ConfigManager.readServerProperties().getProperty("server-ip", "")));
-        // The HTTP server binds the wildcard address; SelfHostAddress advertises it as localhost.
-        candidates.add(new SelfHostAddress.Candidate(SelfHostAddress.Source.BIND_ADDRESS, "0.0.0.0"));
+        // Without upload.self-host.bind the HTTP server binds the wildcard address;
+        // SelfHostAddress advertises that as localhost.
+        candidates.add(new SelfHostAddress.Candidate(SelfHostAddress.Source.BIND_ADDRESS,
+                boundBind.isEmpty() ? "0.0.0.0" : boundBind));
         return SelfHostAddress.resolve(config.getSelfHostPublicUrl(), candidates, boundPort);
     }
 
@@ -374,7 +417,7 @@ public class SelfHostProvider implements UploadProvider, UploadChain.Step {
         if (staged == null) return routeProblem;
         File expected = staged.pack().file();
 
-        String localUrl = "http://127.0.0.1:" + boundPort + SelfHostAddress.PACK_PATH;
+        String localUrl = "http://" + localProbeHost + ":" + boundPort + SelfHostAddress.PACK_PATH;
         ReachabilityProbe.Result local = untokened(ReachabilityProbe.probe(withToken(localUrl, staged.token()),
                 expected, PROBE_TIMEOUT), localUrl, staged.token());
         if (!local.ok()) {

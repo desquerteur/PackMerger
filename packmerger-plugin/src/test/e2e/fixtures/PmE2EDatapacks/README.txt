@@ -1,0 +1,1 @@
+Datapack sources for embedded-datapacks.spec.ts. The spec copies or zips them into world/datapacks (and a second world's datapacks folder) at runtime; nested-rp/ becomes the resource-pack zip inside nested.zip.

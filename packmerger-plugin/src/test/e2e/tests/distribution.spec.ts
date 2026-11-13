@@ -29,7 +29,8 @@ test('joining players are offered the merged pack under the stable server pack U
   expect(offer.uuid).toBe(packUuidForServer('e2e'));
   const served = await downloadPack();
   expect(offer.hash).toBe(served.sha1);
-  await expect(server).toHaveReceivedMessage(`Sent resource pack to ${player.username} (URL: ${PACK_URL})`);
+  // Zero config: the URL is built from the address the bot joined with (localhost), see PlayerPackUrl.
+  await expect(server).toHaveReceivedMessage(`Sent resource pack to ${player.username} (URL: ${PACK_URL}, per-player)`);
 });
 
 // The client drops server packs when it disconnects, so a rejoining player must be sent

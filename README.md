@@ -26,7 +26,7 @@ A Paper plugin that merges multiple Minecraft resource packs into a single pack,
 
 ## Quick start (zero config)
 
-1. **Install the jar.** Put `packmerger-plugin-1.4.1.jar` into `plugins/` and start the
+1. **Install the jar.** Put `packmerger-plugin-1.4.2.jar` into `plugins/` and start the
    server once (Paper 26.1+ / Folia, Java 25).
 2. **Add packs.** Drop resource packs (zips or unzipped folders) into
    `plugins/PackMerger/packs/`, and datapacks into your world's datapacks folder
@@ -248,6 +248,7 @@ upload:
   provider: "self-host"
   self-host:
     port: -1                 # -1 = Minecraft port + 1; or a port your panel allocated
+    bind: ""                 # Listen address; "" = all interfaces, e.g. "127.0.0.1" behind a local reverse proxy
     public-url: ""           # Complete URL, used as-is (only a bare http://host:port gets /pack)
     public-host: ""          # Host name or public IP for the auto-built URL
     detect-public-ip: false  # Opt-in: asks checkip.amazonaws.com / api.ipify.org for the public IP
@@ -255,7 +256,7 @@ upload:
     rate-limit: 50           # Max concurrent downloads (0 = unlimited)
 ```
 
-The self-host provider starts a built-in HTTP server on all interfaces and serves the pack at `/pack`. Make sure the port is open in your firewall (on Pterodactyl/Pelican-style panels, add a port allocation for it).
+The self-host provider starts a built-in HTTP server on all interfaces (or only on `bind`) and serves the pack at `/pack`. Make sure the port is open in your firewall (on Pterodactyl/Pelican-style panels, add a port allocation for it).
 
 **The URL players are sent.** With neither `public-url` nor `public-host` set and no proxy in front (no `settings.bungeecord` in `spigot.yml`, no `proxies.velocity.enabled` or `proxies.proxy-protocol` in `config/paper-global.yml`, no `distribution.proxy-notify`), each player gets `http://<address they joined with>:<port>/pack`: the host they typed in the server list (`Player#getVirtualHost()`: LAN IP, public IP or domain; IPv6 in brackets). The pack, its SHA-1 and its pack UUID are the same for everyone, so the client cache works as before. A client that sends no usable address gets the fixed URL below, and a URL pointing at `localhost`/`127.x`/`::1` is never sent to a player who is not on the server machine (they get no pack and are not kicked; admins are told what to set). `public-url`, if set, is used exactly as written, so a reverse proxy or CDN URL such as `https://cdn.example.com/rp.zip` works (the proxy forwards to `http://<server>:<port>/pack`; requests arriving with the public URL's own path are served as well). Otherwise the URL is `http://<host>:<port>/pack`, with the host taken from the first routable of `public-host`, the opt-in public IP lookup, `server-ip` in `server.properties`, and the bind address. Loopback, private (RFC 1918), link-local, CGNAT, `0.0.0.0` and IPv6 unique-local hosts can't be reached from the internet: PackMerger still uses the best one it found (LAN players can download) but warns on every merge, tells admins on join, and `/pm status` says exactly what to set.
 

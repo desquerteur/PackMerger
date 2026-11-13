@@ -129,7 +129,8 @@ public class FileWatcher {
             try {
                 watchService = FileSystems.getDefault().newWatchService();
                 Map<WatchKey, Path> watchedDirs = new HashMap<>();
-                registerTree(packsPath, packsPath, watchedDirs);
+                boolean fileTree = registerFileTree(watchService, packsPath, watchedDirs);
+                if (!fileTree) registerTree(packsPath, packsPath, watchedDirs);
 
                 String startedMsg = "File watcher started for: " + packsPath + " (" + watchedDirs.size() + " folder(s))";
                 if (name == null) logger.info(startedMsg); else logger.debug(startedMsg);
@@ -178,8 +179,8 @@ public class FileWatcher {
                             logger.debug("File change detected: " + kind.name() + " " + relative);
                         }
                         // Watch directories that appear later (a pack folder moved in,
-                        // or a new sub-folder inside one).
-                        if (kind == StandardWatchEventKinds.ENTRY_CREATE && Files.isDirectory(changed)
+                        // or a new sub-folder inside one); a file-tree watch covers them.
+                        if (!fileTree && kind == StandardWatchEventKinds.ENTRY_CREATE && Files.isDirectory(changed)
                                 && !hasDotSegment(relative)) {
                             registerTree(changed, packsPath, watchedDirs);
                         }
@@ -238,6 +239,29 @@ public class FileWatcher {
             if (segment.toString().startsWith(".")) return true;
         }
         return false;
+    }
+
+    /**
+     * Watches {@code root} and everything below it with one registration, where the
+     * platform supports it (Windows). Registering every folder separately keeps a handle
+     * open on each, and Windows then refuses to rename or move a pack folder or folder
+     * datapack while the server runs. Changes inside dot-folders arrive too; the
+     * relevance filter drops them.
+     *
+     * @return {@code false} if unsupported (Linux, macOS): register each folder instead
+     */
+    static boolean registerFileTree(WatchService watchService, Path root, Map<WatchKey, Path> watchedDirs) {
+        try {
+            WatchKey k = root.register(watchService, new WatchEvent.Kind<?>[] {
+                    StandardWatchEventKinds.ENTRY_CREATE,
+                    StandardWatchEventKinds.ENTRY_MODIFY,
+                    StandardWatchEventKinds.ENTRY_DELETE,
+            }, com.sun.nio.file.ExtendedWatchEventModifier.FILE_TREE);
+            watchedDirs.put(k, root);
+            return true;
+        } catch (UnsupportedOperationException | IOException e) {
+            return false;
+        }
     }
 
     /** Registers {@code start} and every non-dot directory below it. */

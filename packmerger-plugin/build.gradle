@@ -157,6 +157,9 @@ tasks.named('build') {
 // Task.project at execution time (deprecated; breaks the configuration cache).
 def pluginVersion = version
 tasks.named('processResources') {
+    // The expanded value is not an input by itself: without this, a version bump keeps the
+    // old plugin.yml (task UP-TO-DATE) and the jar reports the previous version.
+    inputs.property('version', pluginVersion.toString())
     filesMatching('plugin.yml') {
         expand version: pluginVersion
     }
@@ -174,6 +177,9 @@ tasks.withType(JavaCompile).configureEach {
 def e2ePort = (findProperty('e2ePort') ?: '25567') as int
 def e2eRconPort = (findProperty('e2eRconPort') ?: '25577') as int
 def e2eHttpPort = (findProperty('e2eHttpPort') ?: '28567') as int
+// Minecraft/Paper version of the e2e server; the bot stack also speaks 26.2:
+//   ./gradlew :packmerger-plugin:plugwrightTest -Pe2eMcVersion=26.2
+def e2eMcVersion = (findProperty('e2eMcVersion') ?: '26.3').toString()
 def e2eFixtures = file('src/test/e2e/fixtures')
 // distribution.spec's first test joins a bot before the startup merge, which the fixture
 // delays by 30 s (plugin-packs.merge-delay-seconds; startup to "Done" alone can take 20 s on a busy machine). Filtered runs that don't include that
@@ -188,7 +194,7 @@ plugwright {
             // Paper 26.3 (protocol 777). The published mineflayer stack stops at 26.1; the
             // pcxgg plugwright fork (3.1.0-pcx.1) runs the bots on the 26.3-capable
             // forks of mineflayer / minecraft-protocol / minecraft-data.
-            spec.minecraftVersion.set('26.3')
+            spec.minecraftVersion.set(e2eMcVersion)
             spec.acceptEula.set(true)
             spec.port.set(e2ePort)
             spec.rconPort.set(e2eRconPort)
@@ -197,11 +203,16 @@ plugwright {
             // into plugins/ before every server start. The self-host port in the staged
             // config.yml follows e2eHttpPort, and the specs read it from e2e-ports.json.
             spec.writeFiles { files ->
+                // Loopback only (the bots connect to localhost). Provisioning adds the
+                // port/RCON/online-mode lines; the server fills in the rest.
+                files.file('server.properties', 'server-ip=localhost\n')
                 fileTree(e2eFixtures).visit { details ->
                     if (!details.directory) {
                         if (details.relativePath.pathString == 'PackMerger/config.yml') {
                             files.file("plugins/PackMerger/config.yml",
-                                details.file.getText('UTF-8')
+                                // LF, so the specs' line-based regex edits also work on a
+                                // Windows checkout (core.autocrlf=true gives the fixture CRLF).
+                                details.file.getText('UTF-8').replace('\r\n', '\n')
                                     .replace('port: 28567', "port: ${e2eHttpPort}")
                                     .replace('merge-delay-seconds: 30', "merge-delay-seconds: ${e2eMergeDelay}"))
                         } else {
