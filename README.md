@@ -26,7 +26,7 @@ A Paper plugin that merges multiple Minecraft resource packs into a single pack,
 
 ## Quick start (zero config)
 
-1. **Install the jar.** Put `packmerger-plugin-1.4.2.jar` into `plugins/` and start the
+1. **Install the jar.** Put `packmerger-plugin-1.4.3.jar` into `plugins/` and start the
    server once (Paper 26.1+ / Folia, Java 25).
 2. **Add packs.** Drop resource packs (zips or unzipped folders) into
    `plugins/PackMerger/packs/`, and datapacks into your world's datapacks folder

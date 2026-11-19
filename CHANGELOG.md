@@ -6,6 +6,12 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.4.3] - 2026-11-19
+
+### Changed
+- Dependency updates: Gradle wrapper 9.9.1, minio 9.0.4, gson 2.15.0, JUnit 6.1.3, Shadow plugin 9.6.1.
+- CI: `actions/setup-java` v6.
+
 ## [1.4.2] - 2026-11-02
 
 Fixes found by running the plugin end-to-end on a real Paper 26.2 server (bots via the
